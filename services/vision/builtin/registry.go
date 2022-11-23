@@ -1,4 +1,5 @@
 //go:build !arm
+
 package builtin
 
 import (
@@ -22,13 +23,14 @@ type VisOperation string
 
 // The set of allowed vision model types.
 const (
-	TFLiteDetector    = vision.VisModelType("tflite_detector")
-	TFDetector        = vision.VisModelType("tf_detector")
-	ColorDetector     = vision.VisModelType("color_detector")
-	TFLiteClassifier  = vision.VisModelType("tflite_classifier")
-	TFClassifier      = vision.VisModelType("tf_classifier")
-	RCSegmenter       = vision.VisModelType("radius_clustering_segmenter")
-	DetectorSegmenter = vision.VisModelType("detector_segmenter")
+	TFLiteDetector       = vision.VisModelType("tflite_detector")
+	TFDetector           = vision.VisModelType("tf_detector")
+	ColorDetector        = vision.VisModelType("color_detector")
+	TFLiteClassifier     = vision.VisModelType("tflite_classifier")
+	TFClassifier         = vision.VisModelType("tf_classifier")
+	RCSegmenter          = vision.VisModelType("radius_clustering_segmenter")
+	DetectorSegmenter    = vision.VisModelType("detector_segmenter")
+	FeatureMatchDetector = vision.VisModelType("feature_match_detector")
 )
 
 // registeredModelParameterSchemas maps the vision model types to the necessary parameters needed to create them.
@@ -228,6 +230,8 @@ func registerNewVisModels(ctx context.Context, mm modelMap, attrs *vision.Attrib
 			multierr.AppendInto(&err, registerRCSegmenter(ctx, mm, &attr, logger))
 		case DetectorSegmenter:
 			multierr.AppendInto(&err, registerSegmenterFromDetector(ctx, mm, &attr, logger))
+		case FeatureMatchDetector:
+			multierr.AppendInto(&err, registerFeatureMatchDetector(ctx, mm, &attr, logger))
 		default:
 			multierr.AppendInto(&err, newVisModelTypeNotImplemented(attr.Type))
 		}

@@ -1,4 +1,5 @@
 //go:build !arm
+
 package builtin
 
 import (
@@ -68,6 +69,21 @@ func registerTfliteDetector(ctx context.Context, mm modelMap, conf *vision.VisMo
 	}
 
 	regModel := registeredModel{Model: detector, ModelType: TFLiteDetector, Closer: model}
+	return mm.RegisterVisModel(conf.Name, &regModel, logger)
+}
+
+func registerFeatureMatchDetector(ctx context.Context, mm modelMap, conf *vision.VisModelConfig, logger golog.Logger) error {
+	ctx, span := trace.StartSpan(ctx, "service::vision::registerFeatureMatchDetector")
+	defer span.End()
+	if conf == nil {
+		return errors.New("object detection config for feature match detector cannot be nil")
+	}
+	detector, err := NewFeatureMatchDetector(ctx, conf, logger)
+	if err != nil {
+		return errors.Wrapf(err, "could not register feature match detector %s", conf.Name)
+	}
+
+	regModel := registeredModel{Model: detector, ModelType: FeatureMatchDetector, Closer: nil}
 	return mm.RegisterVisModel(conf.Name, &regModel, logger)
 }
 

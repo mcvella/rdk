@@ -1,6 +1,7 @@
 package keypoints
 
 import (
+	"fmt"
 	"image"
 	"image/draw"
 	"math"
@@ -169,7 +170,7 @@ func TestOrbMatching(t *testing.T) {
 	}
 	matchingConf := &MatchingConfig{
 		DoCrossCheck: true,
-		MaxDist:      1000,
+		MaxDist:      30,
 	}
 	img1, err := rimage.NewImageFromFile(artifact.MustPath("vision/odometry/000001.png"))
 	test.That(t, err, test.ShouldBeNil)
@@ -179,12 +180,15 @@ func TestOrbMatching(t *testing.T) {
 	im2 := rimage.MakeGray(img2)
 	samplePoints := GenerateSamplePairs(orbConf.BRIEFConf.Sampling, orbConf.BRIEFConf.N, orbConf.BRIEFConf.PatchSize)
 	// image 1
-	orb1, _, err := ComputeORBKeypoints(im1, samplePoints, orbConf)
+	orb1, kp1, err := ComputeORBKeypoints(im1, samplePoints, orbConf)
 	test.That(t, err, test.ShouldBeNil)
 	// image 2
-	orb2, _, err := ComputeORBKeypoints(im2, samplePoints, orbConf)
+	orb2, kp2, err := ComputeORBKeypoints(im2, samplePoints, orbConf)
 	test.That(t, err, test.ShouldBeNil)
 	matches := MatchDescriptors(orb1, orb2, matchingConf, logger)
+	t.Logf(fmt.Sprintf("%+v\n", (matches[0])))
+	t.Log(kp1[matches[0].Idx1])
+	t.Log(kp2[matches[0].Idx2])
 	test.That(t, len(matches), test.ShouldBeGreaterThan, 300)
 	test.That(t, len(matches), test.ShouldBeLessThan, 350)
 }
