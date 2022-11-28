@@ -12,7 +12,6 @@ import (
 	"go.opencensus.io/trace"
 
 	"go.viam.com/rdk/config"
-	inf "go.viam.com/rdk/ml/inference"
 	"go.viam.com/rdk/rimage"
 	"go.viam.com/rdk/services/vision"
 	"go.viam.com/rdk/utils"
@@ -148,31 +147,4 @@ func getImageKeypoints(ctx context.Context, img *rimage.Image) (*OrbKP, error) {
 	kps.keypoints = kp
 
 	return &kps, nil
-}
-
-// matchFeatures first converts an input image to a buffer using the imageToBuffer func
-// and then performs descriptor matching.
-func matchFeatures(ctx context.Context, model *inf.TFLiteStruct, image image.Image) ([]interface{}, error) {
-	_, span := trace.StartSpan(ctx, "service::vision::tfliteInfer")
-	defer span.End()
-
-	// Converts the image to bytes before sending it off
-	switch model.Info.InputTensorType {
-	case inf.UInt8:
-		imgBuff := ImageToUInt8Buffer(image)
-		out, err := model.Infer(imgBuff)
-		if err != nil {
-			return nil, errors.Wrap(err, "couldn't infer from model")
-		}
-		return out, nil
-	case inf.Float32:
-		imgBuff := ImageToFloatBuffer(image)
-		out, err := model.Infer(imgBuff)
-		if err != nil {
-			return nil, errors.Wrap(err, "couldn't infer from model")
-		}
-		return out, nil
-	default:
-		return nil, errors.New("invalid input type. try uint8 or float32")
-	}
 }
