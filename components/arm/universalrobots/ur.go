@@ -16,7 +16,6 @@ import (
 	"github.com/edaniels/golog"
 	"github.com/pkg/errors"
 	"go.uber.org/multierr"
-	commonpb "go.viam.com/api/common/v1"
 	pb "go.viam.com/api/component/arm/v1"
 	goutils "go.viam.com/utils"
 
@@ -55,9 +54,6 @@ func (cfg *AttrConfig) Validate(path string) ([]string, error) {
 
 //go:embed ur5e.json
 var ur5modeljson []byte
-
-//go:embed ur5e_DH.json
-var ur5DHmodeljson []byte
 
 func init() {
 	registry.RegisterComponent(arm.Subtype, ModelName, registry.Component{
@@ -257,7 +253,7 @@ func (ua *URArm) EndPosition(ctx context.Context, extra map[string]interface{}) 
 func (ua *URArm) MoveToPosition(
 	ctx context.Context,
 	pos spatialmath.Pose,
-	worldState *commonpb.WorldState,
+	worldState *referenceframe.WorldState,
 	extra map[string]interface{},
 ) error {
 	ctx, done := ua.opMgr.New(ctx)
@@ -473,7 +469,7 @@ func reader(ctx context.Context, conn io.Reader, ua *URArm, onHaveData func()) e
 
 const errURHostedKinematics = "cannot use UR hosted kinematics with obstacles or interaction spaces"
 
-func (ua *URArm) useURHostedKinematics(worldState *commonpb.WorldState, extra map[string]interface{}) (bool, error) {
+func (ua *URArm) useURHostedKinematics(worldState *referenceframe.WorldState, extra map[string]interface{}) (bool, error) {
 	// function to error out if trying to use world state with hosted kinematics
 	checkWorldState := func(usingHostedKinematics bool) (bool, error) {
 		if usingHostedKinematics && worldState != nil && (len(worldState.Obstacles) != 0 || len(worldState.InteractionSpaces) != 0) {

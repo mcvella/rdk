@@ -10,6 +10,7 @@ import (
 
 	"github.com/edaniels/golog"
 	"github.com/fullstorydev/grpcurl"
+	grpc_retry "github.com/grpc-ecosystem/go-grpc-middleware/retry"
 	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/grpcreflect"
 	"github.com/pkg/errors"
@@ -25,7 +26,6 @@ import (
 	reflectpb "google.golang.org/grpc/reflection/grpc_reflection_v1alpha"
 	"google.golang.org/grpc/status"
 
-	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/discovery"
 	"go.viam.com/rdk/grpc"
 	"go.viam.com/rdk/operation"
@@ -35,6 +35,7 @@ import (
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/robot"
 	framesystemparts "go.viam.com/rdk/robot/framesystem/parts"
+	"go.viam.com/rdk/session"
 	rutils "go.viam.com/rdk/utils"
 )
 
@@ -76,6 +77,13 @@ type RobotClient struct {
 	notifyParent func()
 
 	closeContext context.Context
+
+	// sessions
+	sessionsDisabled         bool
+	sessionMu                sync.RWMutex
+	sessionsSupported        *bool // when nil, we have not yet checked
+	currentSessionID         string
+	sessionHeartbeatInterval time.Duration
 }
 
 var exemptFromConnectionCheck = map[string]bool{
@@ -194,6 +202,7 @@ func New(ctx context.Context, address string, logger golog.Logger, opts ...Robot
 		notifyParent:            nil,
 		resourceClients:         make(map[resource.Name]interface{}),
 		remoteNameMap:           make(map[resource.Name]resource.Name),
+		sessionsDisabled:        rOpts.disableSessions,
 	}
 
 	// interceptors are applied in order from first to last
@@ -202,6 +211,11 @@ func New(ctx context.Context, address string, logger golog.Logger, opts ...Robot
 		// error handling
 		rpc.WithUnaryClientInterceptor(rc.handleUnaryDisconnect),
 		rpc.WithStreamClientInterceptor(rc.handleStreamDisconnect),
+		// sessions
+		rpc.WithUnaryClientInterceptor(grpc_retry.UnaryClientInterceptor()),
+		rpc.WithStreamClientInterceptor(grpc_retry.StreamClientInterceptor()),
+		rpc.WithUnaryClientInterceptor(rc.sessionUnaryClientInterceptor),
+		rpc.WithStreamClientInterceptor(rc.sessionStreamClientInterceptor),
 		// operations
 		rpc.WithUnaryClientInterceptor(operation.UnaryClientInterceptor),
 		rpc.WithStreamClientInterceptor(operation.StreamClientInterceptor),
@@ -646,6 +660,11 @@ func (rc *RobotClient) OperationManager() *operation.Manager {
 	return nil
 }
 
+// SessionManager returns nil.
+func (rc *RobotClient) SessionManager() session.Manager {
+	return nil
+}
+
 // ResourceNames returns all resource names.
 func (rc *RobotClient) ResourceNames() []resource.Name {
 	rc.mu.RLock()
@@ -721,17 +740,22 @@ func (rc *RobotClient) DiscoverComponents(ctx context.Context, qs []discovery.Qu
 }
 
 // FrameSystemConfig returns the info of each individual part that makes up the frame system.
-func (rc *RobotClient) FrameSystemConfig(ctx context.Context, additionalTransforms []*commonpb.Transform) (framesystemparts.Parts, error) {
-	resp, err := rc.client.FrameSystemConfig(ctx, &pb.FrameSystemConfigRequest{
-		SupplementalTransforms: additionalTransforms,
-	})
+func (rc *RobotClient) FrameSystemConfig(
+	ctx context.Context,
+	additionalTransforms []*referenceframe.LinkInFrame,
+) (framesystemparts.Parts, error) {
+	transforms, err := referenceframe.LinkInFramesToTransformsProtobuf(additionalTransforms)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := rc.client.FrameSystemConfig(ctx, &pb.FrameSystemConfigRequest{SupplementalTransforms: transforms})
 	if err != nil {
 		return nil, err
 	}
 	cfgs := resp.GetFrameSystemConfigs()
-	result := make([]*config.FrameSystemPart, 0, len(cfgs))
+	result := make([]*referenceframe.FrameSystemPart, 0, len(cfgs))
 	for _, cfg := range cfgs {
-		part, err := config.ProtobufToFrameSystemPart(cfg)
+		part, err := referenceframe.ProtobufToFrameSystemPart(cfg)
 		if err != nil {
 			return nil, err
 		}
@@ -745,12 +769,16 @@ func (rc *RobotClient) TransformPose(
 	ctx context.Context,
 	query *referenceframe.PoseInFrame,
 	destination string,
-	additionalTransforms []*commonpb.Transform,
+	additionalTransforms []*referenceframe.LinkInFrame,
 ) (*referenceframe.PoseInFrame, error) {
+	transforms, err := referenceframe.LinkInFramesToTransformsProtobuf(additionalTransforms)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := rc.client.TransformPose(ctx, &pb.TransformPoseRequest{
 		Destination:            destination,
 		Source:                 referenceframe.PoseInFrameToProtobuf(query),
-		SupplementalTransforms: additionalTransforms,
+		SupplementalTransforms: transforms,
 	})
 	if err != nil {
 		return nil, err

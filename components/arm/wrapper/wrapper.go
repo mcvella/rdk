@@ -3,9 +3,10 @@ package wrapper
 
 import (
 	"context"
+	"errors"
+	"strings"
 
 	"github.com/edaniels/golog"
-	commonpb "go.viam.com/api/common/v1"
 	pb "go.viam.com/api/component/arm/v1"
 	"go.viam.com/utils"
 
@@ -68,7 +69,20 @@ type Arm struct {
 
 // NewWrapperArm returns a wrapper component for another arm.
 func NewWrapperArm(cfg config.Component, r robot.Robot, logger golog.Logger) (arm.LocalArm, error) {
-	model, err := referenceframe.ParseModelJSONFile(cfg.ConvertedAttributes.(*AttrConfig).ModelPath, cfg.Name)
+	var (
+		model referenceframe.Model
+		err   error
+	)
+	modelPath := cfg.ConvertedAttributes.(*AttrConfig).ModelPath
+	switch {
+	case strings.HasSuffix(modelPath, ".urdf"):
+		model, err = referenceframe.ParseURDFFile(cfg.ConvertedAttributes.(*AttrConfig).ModelPath, cfg.Name)
+	case strings.HasSuffix(modelPath, ".json"):
+		model, err = referenceframe.ParseModelJSONFile(cfg.ConvertedAttributes.(*AttrConfig).ModelPath, cfg.Name)
+	default:
+		return nil, errors.New("unsupported kinematic model encoding file passed")
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +117,7 @@ func (wrapper *Arm) EndPosition(ctx context.Context, extra map[string]interface{
 func (wrapper *Arm) MoveToPosition(
 	ctx context.Context,
 	pos spatialmath.Pose,
-	worldState *commonpb.WorldState,
+	worldState *referenceframe.WorldState,
 	extra map[string]interface{},
 ) error {
 	ctx, done := wrapper.opMgr.New(ctx)

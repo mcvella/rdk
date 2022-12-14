@@ -3,13 +3,11 @@ package universalrobots
 import (
 	"context"
 	"math"
-	"math/rand"
 	"testing"
 
 	"github.com/edaniels/golog"
 	"github.com/go-gl/mathgl/mgl64"
 	"github.com/golang/geo/r3"
-	commonpb "go.viam.com/api/common/v1"
 	"go.viam.com/test"
 	"gonum.org/v1/gonum/mat"
 	"gonum.org/v1/gonum/num/quat"
@@ -19,26 +17,6 @@ import (
 	"go.viam.com/rdk/spatialmath"
 	"go.viam.com/rdk/utils"
 )
-
-func TestUR5eForwardKinematicsSVAvsDH(t *testing.T) {
-	numTests := 10000
-
-	mSVA, err := referenceframe.UnmarshalModelJSON(ur5modeljson, "")
-	test.That(t, err, test.ShouldBeNil)
-	mDH, err := referenceframe.UnmarshalModelJSON(ur5DHmodeljson, "")
-	test.That(t, err, test.ShouldBeNil)
-
-	seed := rand.New(rand.NewSource(23))
-	for i := 0; i < numTests; i++ {
-		joints := referenceframe.JointPositionsFromRadians(referenceframe.GenerateRandomConfiguration(mSVA, seed))
-
-		posSVA, err := motionplan.ComputePosition(mSVA, joints)
-		test.That(t, err, test.ShouldBeNil)
-		posDH, err := motionplan.ComputePosition(mDH, joints)
-		test.That(t, err, test.ShouldBeNil)
-		test.That(t, spatialmath.PoseAlmostEqual(posSVA, posDH), test.ShouldBeTrue)
-	}
-}
 
 func testUR5eForwardKinematics(t *testing.T, jointRadians []float64, correct r3.Vector) {
 	t.Helper()
@@ -134,14 +112,15 @@ func TestKin1(t *testing.T) {
 }
 
 func TestUseURHostedKinematics(t *testing.T) {
-	gifs := []*commonpb.GeometriesInFrame{{Geometries: []*commonpb.Geometry{{
-		Center:       spatialmath.PoseToProtobuf(spatialmath.NewZeroPose()),
-		GeometryType: &commonpb.Geometry_Sphere{Sphere: &commonpb.Sphere{RadiusMm: 1}},
-	}}}}
+	sphere, err := spatialmath.NewSphere(r3.Vector{}, 1, "")
+	test.That(t, err, test.ShouldBeNil)
+	obstacles := make(map[string]spatialmath.Geometry)
+	obstacles["sphere"] = sphere
+	gifs := []*referenceframe.GeometriesInFrame{referenceframe.NewGeometriesInFrame(referenceframe.World, obstacles)}
 
 	// test that under normal circumstances we can use worldstate and our own kinematics
 	ur := URArm{}
-	using, err := ur.useURHostedKinematics(&commonpb.WorldState{Obstacles: gifs}, nil)
+	using, err := ur.useURHostedKinematics(&referenceframe.WorldState{Obstacles: gifs}, nil)
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, using, test.ShouldBeFalse)
 
@@ -154,23 +133,23 @@ func TestUseURHostedKinematics(t *testing.T) {
 
 	// test specifying at config time with no obstacles or extra params at runtime
 	ur.urHostedKinematics = true
-	using, err = ur.useURHostedKinematics(&commonpb.WorldState{}, nil)
+	using, err = ur.useURHostedKinematics(&referenceframe.WorldState{}, nil)
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, using, test.ShouldBeTrue)
 
 	// test that we can override the config preference with extra params
 	extraParams["arm_hosted_kinematics"] = false
-	using, err = ur.useURHostedKinematics(&commonpb.WorldState{Obstacles: gifs}, extraParams)
+	using, err = ur.useURHostedKinematics(&referenceframe.WorldState{Obstacles: gifs}, extraParams)
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, using, test.ShouldBeFalse)
 
 	// test obstacles will cause this to error
-	_, err = ur.useURHostedKinematics(&commonpb.WorldState{Obstacles: gifs}, nil)
+	_, err = ur.useURHostedKinematics(&referenceframe.WorldState{Obstacles: gifs}, nil)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldResemble, errURHostedKinematics)
 
 	// test obstacles will cause this to error
-	_, err = ur.useURHostedKinematics(&commonpb.WorldState{InteractionSpaces: gifs}, nil)
+	_, err = ur.useURHostedKinematics(&referenceframe.WorldState{InteractionSpaces: gifs}, nil)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldResemble, errURHostedKinematics)
 }

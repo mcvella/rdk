@@ -8,8 +8,6 @@ import (
 	"github.com/edaniels/golog"
 	"github.com/golang/geo/r3"
 	"github.com/pkg/errors"
-	// register.
-	commonpb "go.viam.com/api/common/v1"
 	"go.viam.com/test"
 
 	"go.viam.com/rdk/components/base"
@@ -48,44 +46,15 @@ func TestFrameSystemFromConfig(t *testing.T) {
 		&spatialmath.R4AA{Theta: math.Pi / 2, RX: 0., RY: 1., RZ: 0.},
 	)
 
-	transformMsgs := []*commonpb.Transform{
-		{
-			ReferenceFrame: "frame1",
-			PoseInObserverFrame: &commonpb.PoseInFrame{
-				ReferenceFrame: "pieceArm",
-				Pose:           spatialmath.PoseToProtobuf(testPose),
-			},
-		},
-		{
-			ReferenceFrame: "frame2",
-			PoseInObserverFrame: &commonpb.PoseInFrame{
-				ReferenceFrame: "pieceGripper",
-				Pose:           spatialmath.PoseToProtobuf(testPose),
-			},
-		},
-		{
-			ReferenceFrame: "frame2a",
-			PoseInObserverFrame: &commonpb.PoseInFrame{
-				ReferenceFrame: "frame2",
-				Pose:           spatialmath.PoseToProtobuf(testPose),
-			},
-		},
-		{
-			ReferenceFrame: "frame2c",
-			PoseInObserverFrame: &commonpb.PoseInFrame{
-				ReferenceFrame: "frame2",
-				Pose:           spatialmath.PoseToProtobuf(testPose),
-			},
-		},
-		{
-			ReferenceFrame: "frame3",
-			PoseInObserverFrame: &commonpb.PoseInFrame{
-				ReferenceFrame: "world",
-				Pose:           spatialmath.PoseToProtobuf(testPose),
-			},
-		},
+	transforms := []*referenceframe.LinkInFrame{
+		referenceframe.NewLinkInFrame("pieceArm", testPose, "frame1", nil),
+		referenceframe.NewLinkInFrame("pieceGripper", testPose, "frame2", nil),
+		referenceframe.NewLinkInFrame("frame2", testPose, "frame2a", nil),
+		referenceframe.NewLinkInFrame("frame2", testPose, "frame2c", nil),
+		referenceframe.NewLinkInFrame(referenceframe.World, testPose, "frame3", nil),
 	}
-	fs, err := framesystem.RobotFrameSystem(context.Background(), r, transformMsgs)
+
+	fs, err := framesystem.RobotFrameSystem(context.Background(), r, transforms)
 	test.That(t, err, test.ShouldBeNil)
 	// 4 frames defined + 5 from transforms, 18 frames when including the offset,
 	test.That(t, len(fs.FrameNames()), test.ShouldEqual, 18)
@@ -109,7 +78,7 @@ func TestFrameSystemFromConfig(t *testing.T) {
 	test.That(t, fs.Frame("pieceGripper"), test.ShouldNotBeNil)
 	pose, err = fs.Frame("pieceGripper").Transform(emptyIn)
 	test.That(t, err, test.ShouldBeNil)
-	pointAlmostEqual(t, pose.Point(), r3.Vector{0, 0, 200})
+	pointAlmostEqual(t, pose.Point(), r3.Vector{0, 0, 0})
 
 	t.Log("pieceGripper_origin")
 	test.That(t, fs.Frame("pieceGripper_origin"), test.ShouldNotBeNil)
@@ -158,7 +127,7 @@ func TestFrameSystemFromConfig(t *testing.T) {
 	transformPose, _ = tf.(*referenceframe.PoseInFrame)
 	pointAlmostEqual(t, transformPose.Pose().Point(), sensorPt)
 
-	gripperPt := r3.Vector{500, 0, -200}
+	gripperPt := r3.Vector{500, 0, 0}
 	tf, err = fs.Transform(blankPos, worldPose, "pieceGripper")
 	test.That(t, err, test.ShouldBeNil)
 	transformPose, _ = tf.(*referenceframe.PoseInFrame)
@@ -236,22 +205,6 @@ func TestWrongFrameSystems(t *testing.T) {
 		&spatialmath.R4AA{Theta: math.Pi / 2, RX: 0., RY: 1., RZ: 0.},
 	)
 
-	transformMsgs := []*commonpb.Transform{
-		{
-			ReferenceFrame: "frame1",
-			PoseInObserverFrame: &commonpb.PoseInFrame{
-				ReferenceFrame: "pieceArm",
-				Pose:           spatialmath.PoseToProtobuf(testPose),
-			},
-		},
-		{
-			ReferenceFrame: "frame2",
-			PoseInObserverFrame: &commonpb.PoseInFrame{
-				ReferenceFrame: "noParent",
-				Pose:           spatialmath.PoseToProtobuf(testPose),
-			},
-		},
-	}
 	cfg, err = config.Read(context.Background(), rdkutils.ResolveFile("robot/impl/data/fake.json"), logger)
 	test.That(t, err, test.ShouldBeNil)
 
@@ -259,20 +212,19 @@ func TestWrongFrameSystems(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 	defer r.Close(context.Background())
 
-	fs, err := framesystem.RobotFrameSystem(context.Background(), r, transformMsgs)
+	transforms := []*referenceframe.LinkInFrame{
+		referenceframe.NewLinkInFrame("pieceArm", testPose, "frame1", nil),
+		referenceframe.NewLinkInFrame("noParent", testPose, "frame2", nil),
+	}
+	fs, err := framesystem.RobotFrameSystem(context.Background(), r, transforms)
 	test.That(t, err, test.ShouldBeError, framesystemparts.NewMissingParentError("frame2", "noParent"))
 	test.That(t, fs, test.ShouldBeNil)
 
-	transformMsgs = []*commonpb.Transform{
-		{
-			PoseInObserverFrame: &commonpb.PoseInFrame{
-				ReferenceFrame: "pieceArm",
-				Pose:           spatialmath.PoseToProtobuf(testPose),
-			},
-		},
+	transforms = []*referenceframe.LinkInFrame{
+		referenceframe.NewLinkInFrame("pieceArm", testPose, "", nil),
 	}
-	fs, err = framesystem.RobotFrameSystem(context.Background(), r, transformMsgs)
-	test.That(t, err, test.ShouldBeError, config.NewMissingReferenceFrameError(&commonpb.Transform{}))
+	fs, err = framesystem.RobotFrameSystem(context.Background(), r, transforms)
+	test.That(t, err, test.ShouldBeError, referenceframe.ErrEmptyStringFrameName)
 	test.That(t, fs, test.ShouldBeNil)
 }
 
@@ -292,6 +244,14 @@ func TestServiceWithRemote(t *testing.T) {
 	err = remoteRobot.StartWeb(ctx, options)
 	test.That(t, err, test.ShouldBeNil)
 
+	o1 := &spatialmath.R4AA{math.Pi / 2., 0, 0, 1}
+	o1Cfg, err := spatialmath.NewOrientationConfig(o1)
+	test.That(t, err, test.ShouldBeNil)
+
+	o2 := &spatialmath.R4AA{math.Pi / 2., 1, 0, 0}
+	o2Cfg, err := spatialmath.NewOrientationConfig(o2)
+	test.That(t, err, test.ShouldBeNil)
+
 	// make the local robot
 	localConfig := &config.Config{
 		Components: []config.Component{
@@ -300,7 +260,7 @@ func TestServiceWithRemote(t *testing.T) {
 				Name:      "foo",
 				Type:      base.SubtypeName,
 				Model:     "fake",
-				Frame: &config.Frame{
+				Frame: &referenceframe.LinkConfig{
 					Parent: referenceframe.World,
 				},
 			},
@@ -309,7 +269,7 @@ func TestServiceWithRemote(t *testing.T) {
 				Name:      "myParentIsRemote",
 				Type:      gripper.SubtypeName,
 				Model:     "fake",
-				Frame: &config.Frame{
+				Frame: &referenceframe.LinkConfig{
 					Parent: "bar:pieceArm",
 				},
 			},
@@ -318,19 +278,19 @@ func TestServiceWithRemote(t *testing.T) {
 			{
 				Name:    "bar",
 				Address: addr,
-				Frame: &config.Frame{
+				Frame: &referenceframe.LinkConfig{
 					Parent:      "foo",
 					Translation: r3.Vector{100, 200, 300},
-					Orientation: &spatialmath.R4AA{math.Pi / 2., 0, 0, 1},
+					Orientation: o1Cfg,
 				},
 			},
 			{
 				Name:    "squee",
 				Address: addr,
-				Frame: &config.Frame{
+				Frame: &referenceframe.LinkConfig{
 					Parent:      referenceframe.World,
 					Translation: r3.Vector{500, 600, 700},
-					Orientation: &spatialmath.R4AA{math.Pi / 2., 1, 0, 0},
+					Orientation: o2Cfg,
 				},
 			},
 			{
@@ -346,51 +306,21 @@ func TestServiceWithRemote(t *testing.T) {
 		&spatialmath.R4AA{Theta: math.Pi / 2, RX: 0., RY: 1., RZ: 0.},
 	)
 
-	transformMsgs := []*commonpb.Transform{
-		{
-			ReferenceFrame: "frame1",
-			PoseInObserverFrame: &commonpb.PoseInFrame{
-				ReferenceFrame: "bar:pieceArm",
-				Pose:           spatialmath.PoseToProtobuf(testPose),
-			},
-		},
-		{
-			ReferenceFrame: "frame2",
-			PoseInObserverFrame: &commonpb.PoseInFrame{
-				ReferenceFrame: "bar:pieceGripper",
-				Pose:           spatialmath.PoseToProtobuf(testPose),
-			},
-		},
-		{
-			ReferenceFrame: "frame2a",
-			PoseInObserverFrame: &commonpb.PoseInFrame{
-				ReferenceFrame: "frame2",
-				Pose:           spatialmath.PoseToProtobuf(testPose),
-			},
-		},
-		{
-			ReferenceFrame: "frame2c",
-			PoseInObserverFrame: &commonpb.PoseInFrame{
-				ReferenceFrame: "frame2",
-				Pose:           spatialmath.PoseToProtobuf(testPose),
-			},
-		},
-		{
-			ReferenceFrame: "frame3",
-			PoseInObserverFrame: &commonpb.PoseInFrame{
-				ReferenceFrame: "world",
-				Pose:           spatialmath.PoseToProtobuf(testPose),
-			},
-		},
+	transforms := []*referenceframe.LinkInFrame{
+		referenceframe.NewLinkInFrame("bar:pieceArm", testPose, "frame1", nil),
+		referenceframe.NewLinkInFrame("bar:pieceGripper", testPose, "frame2", nil),
+		referenceframe.NewLinkInFrame("frame2", testPose, "frame2a", nil),
+		referenceframe.NewLinkInFrame("frame2", testPose, "frame2c", nil),
+		referenceframe.NewLinkInFrame(referenceframe.World, testPose, "frame3", nil),
 	}
 
 	r2, err := robotimpl.New(context.Background(), localConfig, logger)
 	test.That(t, err, test.ShouldBeNil)
-	fs, err := framesystem.RobotFrameSystem(context.Background(), r2, transformMsgs)
+	fs, err := framesystem.RobotFrameSystem(context.Background(), r2, transforms)
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, fs.FrameNames(), test.ShouldHaveLength, 34)
 	// run the frame system service
-	allParts, err := r2.FrameSystemConfig(context.Background(), transformMsgs)
+	allParts, err := r2.FrameSystemConfig(context.Background(), transforms)
 	test.That(t, err, test.ShouldBeNil)
 	t.Logf("frame system:\n%v", allParts)
 }
