@@ -1,10 +1,12 @@
 // Package yahboom implements a yahboom based robot.
+// code with commands found at http://www.yahboom.net/study/Dofbot-Pi
 package yahboom
 
 import (
 	"context"
 	// for embedding model file.
 	_ "embed"
+	"encoding/binary"
 	"fmt"
 	"math"
 	"sync"
@@ -12,26 +14,25 @@ import (
 
 	"github.com/edaniels/golog"
 	"github.com/pkg/errors"
-	commonpb "go.viam.com/api/common/v1"
 	componentpb "go.viam.com/api/component/arm/v1"
 	"go.viam.com/utils"
 
 	"go.viam.com/rdk/components/arm"
 	"go.viam.com/rdk/components/board"
 	"go.viam.com/rdk/components/generic"
-	"go.viam.com/rdk/components/gripper"
 	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/motionplan"
 	"go.viam.com/rdk/operation"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/registry"
+	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/robot"
 	"go.viam.com/rdk/spatialmath"
 	rdkutils "go.viam.com/rdk/utils"
 )
 
-// ModelName is the string used to refer to the yahboom model.
-const ModelName = "yahboom-dofbot"
+// ModelName is the model used to refer to the yahboom model.
+var ModelName = resource.NewDefaultModel("yahboom-dofbot")
 
 //go:embed dofbot.json
 var modeljson []byte
@@ -90,8 +91,6 @@ func (config *AttrConfig) Validate(path string) error {
 	return nil
 }
 
-const modelname = "yahboom-dofbot"
-
 func init() {
 	registry.RegisterComponent(arm.Subtype, ModelName, registry.Component{
 		RobotConstructor: func(ctx context.Context, r robot.Robot, config config.Component, logger golog.Logger) (interface{}, error) {
@@ -99,7 +98,7 @@ func init() {
 		},
 	})
 
-	config.RegisterComponentAttributeMapConverter(arm.SubtypeName, modelname,
+	config.RegisterComponentAttributeMapConverter(arm.Subtype, ModelName,
 		func(attributes config.AttributeMap) (interface{}, error) {
 			var conf AttrConfig
 			return config.TransformAttributeMapToStruct(&conf, attributes)
@@ -109,13 +108,14 @@ func init() {
 // Dofbot implements a yahboom dofbot arm.
 type Dofbot struct {
 	generic.Unimplemented
-	handle board.I2CHandle
-	model  referenceframe.Model
-	robot  robot.Robot
-	mu     sync.Mutex
-	muMove sync.Mutex
-	logger golog.Logger
-	opMgr  operation.SingleOperationManager
+	handle  board.I2CHandle
+	model   referenceframe.Model
+	robot   robot.Robot
+	mu      sync.Mutex
+	muMove  sync.Mutex
+	logger  golog.Logger
+	opMgr   operation.SingleOperationManager
+	stopped bool
 }
 
 // NewDofBot is a constructor to create a new dofbot arm.
@@ -129,6 +129,7 @@ func NewDofBot(ctx context.Context, r robot.Robot, config config.Component, logg
 
 	a := Dofbot{}
 	a.logger = logger
+	a.robot = r
 
 	b, err := board.FromRobot(r, attr.Board)
 	if err != nil {
@@ -169,14 +170,14 @@ func (a *Dofbot) EndPosition(ctx context.Context, extra map[string]interface{}) 
 	if err != nil {
 		return nil, fmt.Errorf("error getting joint positions: %w", err)
 	}
-	return motionplan.ComputePosition(a.model, joints)
+	return motionplan.ComputeOOBPosition(a.model, joints)
 }
 
 // MoveToPosition moves the arm to the given absolute position.
 func (a *Dofbot) MoveToPosition(
 	ctx context.Context,
 	pos spatialmath.Pose,
-	worldState *commonpb.WorldState,
+	worldState *referenceframe.WorldState,
 	extra map[string]interface{},
 ) error {
 	ctx, done := a.opMgr.New(ctx)
@@ -186,11 +187,20 @@ func (a *Dofbot) MoveToPosition(
 
 // MoveToJointPositions moves the arm's joints to the given positions.
 func (a *Dofbot) MoveToJointPositions(ctx context.Context, pos *componentpb.JointPositions, extra map[string]interface{}) error {
+	// check that joint positions are not out of bounds
+	if err := arm.CheckDesiredJointPositions(ctx, a, pos.Values); err != nil {
+		return err
+	}
+
 	ctx, done := a.opMgr.New(ctx)
 	defer done()
 
 	a.muMove.Lock()
 	defer a.muMove.Unlock()
+	if a.stopped {
+		err := a.turnOnTorque(ctx)
+		a.logger.Warnf("error turning on torque %s: ", err)
+	}
 	if len(pos.Values) > 5 {
 		return fmt.Errorf("yahboom wrong number of degrees got %d, need at most 5", len(pos.Values))
 	}
@@ -290,27 +300,47 @@ func (a *Dofbot) readJointInLock(ctx context.Context, joint int) (float64, error
 
 	time.Sleep(3 * time.Millisecond)
 
-	res, err := a.handle.ReadWordData(ctx, reg)
+	rd, err := a.handle.ReadBlockData(ctx, reg, 2)
 	if err != nil {
 		return 0, fmt.Errorf("error reading joint %v from register %v: %w", joint, reg, err)
 	}
 
 	time.Sleep(3 * time.Millisecond)
 
-	res = (res >> 8 & 0xff) | (res << 8 & 0xff00)
+	res := binary.BigEndian.Uint16(rd)
 	return joints[joint-1].toValues(int(res)), nil
 }
 
 // Stop is unimplemented for the dofbot.
 func (a *Dofbot) Stop(ctx context.Context, extra map[string]interface{}) error {
-	// RSDK-374: Implement Stop for arm
-	return arm.ErrStopUnimplemented
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.stopped = true
+	return a.turnOffTorque(ctx)
+}
+
+func (a *Dofbot) turnOffTorque(ctx context.Context) error {
+	buf := make([]byte, 2)
+
+	buf[0] = byte(0x1A)
+	buf[1] = byte(0x00)
+	return a.handle.Write(ctx, buf)
+}
+
+func (a *Dofbot) turnOnTorque(ctx context.Context) error {
+	buf := make([]byte, 2)
+
+	buf[0] = byte(0x1A)
+	buf[1] = byte(0x01)
+
+	return a.handle.Write(ctx, buf)
 }
 
 // GripperStop is unimplemented for the dofbot.
 func (a *Dofbot) GripperStop(ctx context.Context) error {
-	// RSDK-388: Implement Stop for gripper
-	return gripper.ErrStopUnimplemented
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.Stop(ctx, nil)
 }
 
 // IsMoving returns whether the arm is moving.
@@ -412,6 +442,11 @@ func (a *Dofbot) CurrentInputs(ctx context.Context) ([]referenceframe.Input, err
 
 // GoToInputs moves the arm to the specified goal inputs.
 func (a *Dofbot) GoToInputs(ctx context.Context, goal []referenceframe.Input) error {
+	// check that joint positions are not out of bounds
+	positionDegs := a.model.ProtobufFromInput(goal)
+	if err := arm.CheckDesiredJointPositions(ctx, a, positionDegs.Values); err != nil {
+		return err
+	}
 	return a.MoveToJointPositions(ctx, a.model.ProtobufFromInput(goal), nil)
 }
 

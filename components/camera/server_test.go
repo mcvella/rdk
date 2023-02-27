@@ -121,6 +121,7 @@ func TestServer(t *testing.T) {
 		return camera.Properties{
 			SupportsPCD:     true,
 			IntrinsicParams: intrinsics,
+			ImageType:       camera.DepthStream,
 		}, nil
 	}
 	injectCameraDepth.ProjectorFunc = func(ctx context.Context) (transform.Projector, error) {
@@ -156,7 +157,9 @@ func TestServer(t *testing.T) {
 		_, err = cameraServer.GetImage(context.Background(), &pb.GetImageRequest{Name: fakeCameraName})
 		test.That(t, err, test.ShouldNotBeNil)
 		test.That(t, err.Error(), test.ShouldContainSubstring, "not a camera")
+
 		// color camera
+		// ensure that explicit RawRGBA mimetype request will return RawRGBA mimetype response
 		resp, err := cameraServer.GetImage(
 			context.Background(),
 			&pb.GetImageRequest{Name: testCameraName, MimeType: utils.MimeTypeRawRGBA},
@@ -168,6 +171,7 @@ func TestServer(t *testing.T) {
 		test.That(t, resp.MimeType, test.ShouldEqual, utils.MimeTypeRawRGBA)
 		test.That(t, resp.Image[rimage.RawRGBAHeaderLength:], test.ShouldResemble, img.Pix)
 
+		// ensure that empty mimetype request from color cam will return JPEG mimetype response
 		resp, err = cameraServer.GetImage(
 			context.Background(),
 			&pb.GetImageRequest{Name: testCameraName, MimeType: ""},
@@ -176,9 +180,20 @@ func TestServer(t *testing.T) {
 		imageReleasedMu.Lock()
 		test.That(t, imageReleased, test.ShouldBeTrue)
 		imageReleasedMu.Unlock()
-		test.That(t, resp.MimeType, test.ShouldEqual, utils.MimeTypeRawRGBA)
+		test.That(t, resp.MimeType, test.ShouldEqual, utils.MimeTypeJPEG)
 		test.That(t, resp.Image, test.ShouldNotBeNil)
-		test.That(t, resp.Image[rimage.RawRGBAHeaderLength:], test.ShouldResemble, img.Pix)
+
+		// ensure that empty mimetype request from depth cam will return PNG mimetype response
+		resp, err = cameraServer.GetImage(
+			context.Background(),
+			&pb.GetImageRequest{Name: depthCameraName, MimeType: ""},
+		)
+		test.That(t, err, test.ShouldBeNil)
+		imageReleasedMu.Lock()
+		test.That(t, imageReleased, test.ShouldBeTrue)
+		imageReleasedMu.Unlock()
+		test.That(t, resp.MimeType, test.ShouldEqual, utils.MimeTypeRawDepth)
+		test.That(t, resp.Image, test.ShouldNotBeNil)
 
 		imageReleasedMu.Lock()
 		imageReleased = false
@@ -251,7 +266,7 @@ func TestServer(t *testing.T) {
 		// we know its lazy if it's a mime we can't actually handle internally
 		resp, err := cameraServer.GetImage(context.Background(), &pb.GetImageRequest{
 			Name:     testCameraName,
-			MimeType: utils.WithLazyMIMEType(wooMIME),
+			MimeType: wooMIME,
 		})
 		test.That(t, err, test.ShouldBeNil)
 		test.That(t, resp.MimeType, test.ShouldEqual, wooMIME)
@@ -263,6 +278,23 @@ func TestServer(t *testing.T) {
 		})
 		test.That(t, err, test.ShouldNotBeNil)
 		test.That(t, err.Error(), test.ShouldContainSubstring, "invalid mime type")
+	})
+
+	t.Run("GetImage with +lazy default", func(t *testing.T) {
+		for _, mimeType := range []string{
+			utils.MimeTypePNG,
+			utils.MimeTypeJPEG,
+			utils.MimeTypeRawRGBA,
+		} {
+			req := pb.GetImageRequest{
+				Name:     testCameraName,
+				MimeType: mimeType,
+			}
+			resp, err := cameraServer.GetImage(context.Background(), &req)
+			test.That(t, err, test.ShouldBeNil)
+			test.That(t, resp.Image, test.ShouldNotBeNil)
+			test.That(t, req.MimeType, test.ShouldEqual, utils.WithLazyMIMEType(mimeType))
+		}
 	})
 
 	t.Run("RenderFrame", func(t *testing.T) {

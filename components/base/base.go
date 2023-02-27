@@ -79,6 +79,7 @@ type Base interface {
 	Stop(ctx context.Context, extra map[string]interface{}) error
 
 	generic.Generic
+	resource.MovingCheckable
 }
 
 // A LocalBase represents a physical base of a robot that can report the width of itself.
@@ -86,7 +87,6 @@ type LocalBase interface {
 	Base
 	// Width returns the width of the base in millimeters.
 	Width(ctx context.Context) (int, error)
-	resource.MovingCheckable
 }
 
 var (
@@ -113,30 +113,22 @@ func FromDependencies(deps registry.Dependencies, name string) (Base, error) {
 
 // NewUnimplementedInterfaceError is used when there is a failed interface check.
 func NewUnimplementedInterfaceError(actual interface{}) error {
-	return utils.NewUnimplementedInterfaceError((Base)(nil), actual)
+	return utils.NewUnimplementedInterfaceError((*Base)(nil), actual)
 }
 
 // NewUnimplementedLocalInterfaceError is used when there is a failed interface check.
 func NewUnimplementedLocalInterfaceError(actual interface{}) error {
-	return utils.NewUnimplementedInterfaceError((LocalBase)(nil), actual)
+	return utils.NewUnimplementedInterfaceError((*LocalBase)(nil), actual)
 }
 
 // DependencyTypeError is used when a resource doesn't implement the expected interface.
-func DependencyTypeError(name, actual interface{}) error {
-	return utils.DependencyTypeError(name, (Base)(nil), actual)
+func DependencyTypeError(name string, actual interface{}) error {
+	return utils.DependencyTypeError(name, (*Base)(nil), actual)
 }
 
 // FromRobot is a helper for getting the named base from the given Robot.
 func FromRobot(r robot.Robot, name string) (Base, error) {
-	res, err := r.ResourceByName(Named(name))
-	if err != nil {
-		return nil, err
-	}
-	part, ok := res.(Base)
-	if !ok {
-		return nil, NewUnimplementedInterfaceError(res)
-	}
-	return part, nil
+	return robot.ResourceFromRobot[Base](r, Named(name))
 }
 
 // NamesFromRobot is a helper for getting all base names from the given Robot.
@@ -146,7 +138,7 @@ func NamesFromRobot(r robot.Robot) []string {
 
 // CreateStatus creates a status from the base.
 func CreateStatus(ctx context.Context, resource interface{}) (*commonpb.ActuatorStatus, error) {
-	base, ok := resource.(LocalBase)
+	base, ok := resource.(Base)
 	if !ok {
 		return nil, NewUnimplementedLocalInterfaceError(resource)
 	}
@@ -229,6 +221,12 @@ func (r *reconfigurableBase) Reconfigure(ctx context.Context, newBase resource.R
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.reconfigure(ctx, newBase)
+}
+
+func (r *reconfigurableBase) IsMoving(ctx context.Context) (bool, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.actual.IsMoving(ctx)
 }
 
 func (r *reconfigurableBase) reconfigure(ctx context.Context, newBase resource.Reconfigurable) error {

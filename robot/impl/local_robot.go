@@ -13,14 +13,17 @@ import (
 	"github.com/edaniels/golog"
 	"github.com/pkg/errors"
 	"go.uber.org/multierr"
-	commonpb "go.viam.com/api/common/v1"
+	pb "go.viam.com/api/app/packages/v1"
 	goutils "go.viam.com/utils"
 	"go.viam.com/utils/pexec"
 	"go.viam.com/utils/rpc"
 
 	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/discovery"
+	"go.viam.com/rdk/module/modmanager"
+	modif "go.viam.com/rdk/module/modmaninterface"
 	"go.viam.com/rdk/operation"
+	"go.viam.com/rdk/pointcloud"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/registry"
 	"go.viam.com/rdk/resource"
@@ -28,16 +31,19 @@ import (
 	"go.viam.com/rdk/robot/client"
 	"go.viam.com/rdk/robot/framesystem"
 	framesystemparts "go.viam.com/rdk/robot/framesystem/parts"
+	"go.viam.com/rdk/robot/packages"
 	"go.viam.com/rdk/robot/web"
 	weboptions "go.viam.com/rdk/robot/web/options"
+	"go.viam.com/rdk/session"
 	"go.viam.com/rdk/utils"
 )
 
 type internalServiceName string
 
 const (
-	webName         internalServiceName = "web"
-	framesystemName internalServiceName = "framesystem"
+	webName            internalServiceName = "web"
+	framesystemName    internalServiceName = "framesystem"
+	packageManagerName internalServiceName = "packagemanager"
 )
 
 var _ = robot.LocalRobot(&localRobot{})
@@ -45,11 +51,15 @@ var _ = robot.LocalRobot(&localRobot{})
 // localRobot satisfies robot.LocalRobot and defers most
 // logic to its manager.
 type localRobot struct {
-	mu         sync.Mutex
-	manager    *resourceManager
-	config     *config.Config
-	operations *operation.Manager
-	logger     golog.Logger
+	mu             sync.Mutex
+	manager        *resourceManager
+	config         *config.Config
+	operations     *operation.Manager
+	modules        modif.ModuleManager
+	sessionManager session.Manager
+	packageManager packages.ManagerSyncer
+	cloudConn      rpc.ClientConn
+	logger         golog.Logger
 
 	// services internal to a localRobot. Currently just web, more to come.
 	internalServices     map[internalServiceName]interface{}
@@ -130,14 +140,33 @@ func (r *localRobot) OperationManager() *operation.Manager {
 	return r.operations
 }
 
+// ModuleManager returns the module manager for the robot.
+func (r *localRobot) ModuleManager() modif.ModuleManager {
+	return r.modules
+}
+
+// SessionManager returns the session manager for the robot.
+func (r *localRobot) SessionManager() session.Manager {
+	return r.sessionManager
+}
+
+// PackageManager returns the package manager for the robot.
+func (r *localRobot) PackageManager() packages.Manager {
+	return r.packageManager
+}
+
 // Close attempts to cleanly close down all constituent parts of the robot.
 func (r *localRobot) Close(ctx context.Context) error {
-	for _, svc := range r.internalServices {
-		if err := goutils.TryClose(ctx, svc); err != nil {
-			return err
-		}
+	web, err := r.webService()
+	if err == nil {
+		web.Stop()
 	}
-
+	for s, svc := range r.internalServices {
+		if s == webName {
+			continue
+		}
+		err = multierr.Combine(err, goutils.TryClose(ctx, svc))
+	}
 	if r.cancelBackgroundWorkers != nil {
 		close(r.remotesChanged)
 		r.cancelBackgroundWorkers()
@@ -148,7 +177,20 @@ func (r *localRobot) Close(ctx context.Context) error {
 		close(r.triggerConfig)
 	}
 	r.activeBackgroundWorkers.Wait()
-	return r.manager.Close(ctx)
+
+	if r.cloudConn != nil {
+		err = multierr.Combine(err, r.cloudConn.Close())
+	}
+
+	err = multierr.Combine(
+		err,
+		r.manager.Close(ctx, r),
+		r.modules.Close(ctx),
+		r.packageManager.Close(),
+		goutils.TryClose(ctx, web),
+	)
+	r.sessionManager.Close()
+	return err
 }
 
 // StopAll cancels all current and outstanding operations for the robot and stops all actuators and movement.
@@ -208,6 +250,24 @@ func (r *localRobot) StopWeb() error {
 		return err
 	}
 	return webSvc.Close()
+}
+
+// WebAddress return the web service's address.
+func (r *localRobot) WebAddress() (string, error) {
+	webSvc, err := r.webService()
+	if err != nil {
+		return "", err
+	}
+	return webSvc.Address(), nil
+}
+
+// ModuleAddress return the module service's address.
+func (r *localRobot) ModuleAddress() (string, error) {
+	webSvc, err := r.webService()
+	if err != nil {
+		return "", err
+	}
+	return webSvc.ModuleAddress(), nil
 }
 
 // remoteNameByResource returns the remote the resource is pulled from, if found.
@@ -340,9 +400,9 @@ func (r *localRobot) updateDefaultServiceNames(cfg *config.Config) *config.Confi
 		}
 		svcCfg := config.Service{
 			Name:      name.Name,
-			Model:     resource.DefaultModelName,
+			Model:     resource.DefaultServiceModel,
 			Namespace: name.Namespace,
-			Type:      config.ServiceType(name.ResourceSubtype),
+			Type:      name.ResourceSubtype,
 		}
 		cfg.Services = append(cfg.Services, svcCfg)
 	}
@@ -360,6 +420,7 @@ func newWithResources(
 	for _, opt := range opts {
 		opt.apply(&rOpts)
 	}
+
 	closeCtx, cancel := context.WithCancel(ctx)
 	r := &localRobot{
 		manager: newResourceManager(
@@ -383,6 +444,13 @@ func newWithResources(
 		configTimer:                nil,
 		revealSensitiveConfigDiffs: rOpts.revealSensitiveConfigDiffs,
 	}
+	var heartbeatWindow time.Duration
+	if cfg.Network.Sessions.HeartbeatWindow == 0 {
+		heartbeatWindow = config.DefaultSessionHeartbeatWindow
+	} else {
+		heartbeatWindow = cfg.Network.Sessions.HeartbeatWindow
+	}
+	r.sessionManager = robot.NewSessionManager(r, heartbeatWindow)
 
 	var successful bool
 	defer func() {
@@ -392,12 +460,91 @@ func newWithResources(
 			}
 		}
 	}()
+
+	if cfg.Cloud != nil && cfg.Cloud.AppAddress != "" {
+		var err error
+		timeOutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		r.cloudConn, err = config.CreateNewGRPCClient(timeOutCtx, cfg.Cloud, logger)
+		cancel()
+		if err == nil {
+			r.packageManager, err = packages.NewCloudManager(pb.NewPackageServiceClient(r.cloudConn), cfg.PackagePath, logger)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			if !errors.Is(err, context.DeadlineExceeded) {
+				return nil, err
+			}
+			r.logger.Debug("Using no-op PackageManager when internet not available")
+			r.packageManager = packages.NewNoopManager()
+		}
+	} else {
+		r.logger.Debug("Using no-op PackageManager when Cloud config is not available")
+		r.packageManager = packages.NewNoopManager()
+	}
+
 	// start process manager early
 	if err := r.manager.processManager.Start(ctx); err != nil {
 		return nil, err
 	}
 
-	cfg = r.updateDefaultServiceNames(cfg)
+	r.internalServices = make(map[internalServiceName]interface{})
+	r.internalServices[webName] = web.New(ctx, r, logger, rOpts.webOptions...)
+	r.internalServices[framesystemName] = framesystem.New(ctx, r, logger)
+	r.internalServices[packageManagerName] = r.packageManager
+
+	webSvc, err := r.webService()
+	if err != nil {
+		return nil, err
+	}
+	if err := webSvc.StartModule(ctx); err != nil {
+		return nil, err
+	}
+
+	modMgr, err := modmanager.NewManager(r)
+	if err != nil {
+		return nil, err
+	}
+	r.modules = modMgr
+
+	for _, mod := range cfg.Modules {
+		err := r.modules.Add(ctx, mod)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// See if default service already exists in the config
+	seen := make(map[resource.Subtype]bool)
+	for _, name := range resource.DefaultServices {
+		seen[name.Subtype] = false
+		r.defaultServicesNames[name.Subtype] = name
+	}
+	// Mark default service subtypes in the map as true
+	for _, val := range cfg.Services {
+		if _, ok := seen[val.ResourceName().Subtype]; ok {
+			seen[val.ResourceName().Subtype] = true
+			r.defaultServicesNames[val.ResourceName().Subtype] = val.ResourceName()
+		}
+	}
+	// default services added if they are not already defined in the config
+	for _, name := range resource.DefaultServices {
+		if seen[name.Subtype] {
+			continue
+		}
+		cfg := config.Service{
+			Name:      name.Name,
+			Model:     resource.DefaultServiceModel,
+			Namespace: name.Namespace,
+			Type:      name.ResourceSubtype,
+		}
+		svc, err := r.newService(ctx, cfg)
+		if err != nil {
+			logger.Errorw("failed to add default service", "error", err, "service", name)
+			continue
+		}
+		r.manager.addResource(name, svc)
+	}
 
 	r.activeBackgroundWorkers.Add(1)
 	// this goroutine listen for changes in connection status of a remote
@@ -446,10 +593,6 @@ func newWithResources(
 		}
 	}, r.activeBackgroundWorkers.Done)
 
-	r.internalServices = make(map[internalServiceName]interface{})
-	r.internalServices[webName] = web.New(ctx, r, logger, rOpts.webOptions...)
-	r.internalServices[framesystemName] = framesystem.New(ctx, r, logger)
-
 	r.config = &config.Config{}
 
 	r.Reconfigure(ctx, cfg)
@@ -476,14 +619,19 @@ func New(
 	return newWithResources(ctx, cfg, nil, logger, opts...)
 }
 
-func (r *localRobot) newService(ctx context.Context, config config.Service) (interface{}, error) {
+func (r *localRobot) newService(ctx context.Context, config config.Service) (res interface{}, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = errors.Wrap(errors.Errorf("%v", r), "panic creating service")
+		}
+	}()
 	rName := config.ResourceName()
 	f := registry.ServiceLookup(rName.Subtype, config.Model)
 	// If service model/type not found then print list of valid models they can choose from
 	if f == nil {
 		validModels := registry.FindValidServiceModels(rName)
-		return nil, errors.Errorf("unknown service type: %s and/or model: %s use one of the following valid models: %s",
-			rName.Subtype, config.Model, strings.Join(validModels, ", "))
+		return nil, errors.Errorf("unknown service subtype: %s and/or model: %s use one of the following valid models: %s",
+			rName.Subtype, config.Model, validModels)
 	}
 
 	deps, err := r.getDependencies(rName)
@@ -492,7 +640,7 @@ func (r *localRobot) newService(ctx context.Context, config config.Service) (int
 	}
 	c := registry.ResourceSubtypeLookup(rName.Subtype)
 
-	// If MaxInstance equals zero then there is not limit on the number of services
+	// If MaxInstance equals zero then there is not a limit on the number of services
 	if c.MaxInstance != 0 {
 		if err := r.checkMaxInstance(rName.Subtype, c.MaxInstance); err != nil {
 			return nil, err
@@ -533,7 +681,12 @@ func (r *localRobot) getDependencies(rName resource.Name) (registry.Dependencies
 	return deps, nil
 }
 
-func (r *localRobot) newResource(ctx context.Context, config config.Component) (interface{}, error) {
+func (r *localRobot) newResource(ctx context.Context, config config.Component) (res interface{}, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = errors.Wrap(errors.Errorf("%v", r), "panic creating resource")
+		}
+	}()
 	rName := config.ResourceName()
 	f := registry.ComponentLookup(rName.Subtype, config.Model)
 	if f == nil {
@@ -614,7 +767,10 @@ func (r *localRobot) Refresh(ctx context.Context) error {
 }
 
 // FrameSystemConfig returns the info of each individual part that makes up a robot's frame system.
-func (r *localRobot) FrameSystemConfig(ctx context.Context, additionalTransforms []*commonpb.Transform) (framesystemparts.Parts, error) {
+func (r *localRobot) FrameSystemConfig(
+	ctx context.Context,
+	additionalTransforms []*referenceframe.LinkInFrame,
+) (framesystemparts.Parts, error) {
 	framesystem, err := r.fsService()
 	if err != nil {
 		return nil, err
@@ -628,7 +784,7 @@ func (r *localRobot) TransformPose(
 	ctx context.Context,
 	pose *referenceframe.PoseInFrame,
 	dst string,
-	additionalTransforms []*commonpb.Transform,
+	additionalTransforms []*referenceframe.LinkInFrame,
 ) (*referenceframe.PoseInFrame, error) {
 	framesystem, err := r.fsService()
 	if err != nil {
@@ -636,6 +792,19 @@ func (r *localRobot) TransformPose(
 	}
 
 	return framesystem.TransformPose(ctx, pose, dst, additionalTransforms)
+}
+
+// TransformPointCloud will transform the pointcloud to the desired frame in the robot's frame system.
+// Do not move the robot between the generation of the initial pointcloud and the receipt
+// of the transformed pointcloud because that will make the transformations inaccurate.
+func (r *localRobot) TransformPointCloud(ctx context.Context, srcpc pointcloud.PointCloud, srcName, dstName string,
+) (pointcloud.PointCloud, error) {
+	framesystem, err := r.fsService()
+	if err != nil {
+		return nil, err
+	}
+
+	return framesystem.TransformPointCloud(ctx, srcpc, srcName, dstName)
 }
 
 // RobotFromConfigPath is a helper to read and process a config given its path and then create a robot based on it.
@@ -682,14 +851,14 @@ func (r *localRobot) DiscoverComponents(ctx context.Context, qs []discovery.Quer
 	for q := range deduped {
 		discoveryFunction, ok := registry.DiscoveryFunctionLookup(q)
 		if !ok {
-			r.logger.Warnw("no discovery function registered", "subtype", q.SubtypeName, "model", q.Model)
+			r.logger.Warnw("no discovery function registered", "subtype", q.API, "model", q.Model)
 			continue
 		}
 
 		if discoveryFunction != nil {
 			discovered, err := discoveryFunction(ctx)
 			if err != nil {
-				return nil, &discovery.DiscoverError{q}
+				return nil, &discovery.DiscoverError{Query: q}
 			}
 			discoveries = append(discoveries, discovery.Discovery{Query: q, Results: discovered})
 		}
@@ -743,6 +912,14 @@ func (r *localRobot) Reconfigure(ctx context.Context, newConfig *config.Config) 
 	if r.revealSensitiveConfigDiffs {
 		r.logger.Debugf("(re)configuring with %+v", diff)
 	}
+
+	// Sync Packages before reconfiguring rest of robot.
+	// TODO(RSDK-1849): Make this non-blocking so other resources that do not require packages can run before package sync finishes.
+	err = r.packageManager.Sync(ctx, newConfig.Packages)
+	if err != nil {
+		allErrs = multierr.Combine(allErrs, err)
+	}
+
 	// First we remove resources and their children that are not in the graph.
 	filtered, err := r.manager.FilterFromConfig(ctx, diff.Removed, r.logger)
 	if err != nil {
@@ -783,10 +960,15 @@ func (r *localRobot) Reconfigure(ctx context.Context, newConfig *config.Config) 
 		allErrs = multierr.Combine(allErrs, err)
 	}
 	r.config = newConfig
-	allErrs = multierr.Combine(allErrs, filtered.Close(ctx))
+	allErrs = multierr.Combine(allErrs, filtered.Close(ctx, r))
 	// Third we attempt to complete the config (see function for details)
 	r.manager.completeConfig(ctx, r)
 	r.updateDefaultServices(ctx)
+
+	// cleanup unused packages after all old resources have been closed above. This ensures
+	// processes are shutdown before any files are deleted they are using.
+	allErrs = multierr.Combine(allErrs, r.packageManager.Cleanup(ctx))
+
 	if allErrs != nil {
 		r.logger.Errorw("the following errors were gathered during reconfiguration", "errors", allErrs)
 	}

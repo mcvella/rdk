@@ -10,7 +10,6 @@ import (
 	"go.viam.com/utils/rpc"
 	"google.golang.org/protobuf/types/known/structpb"
 
-	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/components/sensor"
 	"go.viam.com/rdk/protoutils"
 	"go.viam.com/rdk/spatialmath"
@@ -85,6 +84,21 @@ func (c *client) AngularVelocity(ctx context.Context, extra map[string]interface
 	return spatialmath.AngularVelocity(protoutils.ConvertVectorProtoToR3(resp.AngularVelocity)), nil
 }
 
+func (c *client) LinearAcceleration(ctx context.Context, extra map[string]interface{}) (r3.Vector, error) {
+	ext, err := structpb.NewStruct(extra)
+	if err != nil {
+		return r3.Vector{}, err
+	}
+	resp, err := c.client.GetLinearAcceleration(ctx, &pb.GetLinearAccelerationRequest{
+		Name:  c.name,
+		Extra: ext,
+	})
+	if err != nil {
+		return r3.Vector{}, err
+	}
+	return protoutils.ConvertVectorProtoToR3(resp.LinearAcceleration), nil
+}
+
 func (c *client) Orientation(ctx context.Context, extra map[string]interface{}) (spatialmath.Orientation, error) {
 	ext, err := structpb.NewStruct(extra)
 	if err != nil {
@@ -151,5 +165,5 @@ func (c *client) Properties(ctx context.Context, extra map[string]interface{}) (
 }
 
 func (c *client) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-	return generic.DoFromConnection(ctx, c.conn, c.name, cmd)
+	return protoutils.DoFromResourceClient(ctx, c.client, c.name, cmd)
 }

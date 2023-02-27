@@ -12,7 +12,7 @@ import (
 	"go.viam.com/test"
 
 	"go.viam.com/rdk/components/board"
-	"go.viam.com/rdk/components/board/commonsysfs"
+	"go.viam.com/rdk/components/board/genericlinux"
 	picommon "go.viam.com/rdk/components/board/pi/common"
 	"go.viam.com/rdk/components/encoder"
 	"go.viam.com/rdk/components/motor"
@@ -20,6 +20,7 @@ import (
 	"go.viam.com/rdk/components/servo"
 	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/registry"
+	"go.viam.com/rdk/resource"
 )
 
 func TestPiHardware(t *testing.T) {
@@ -30,7 +31,7 @@ func TestPiHardware(t *testing.T) {
 	ctx := context.Background()
 	logger := golog.NewTestLogger(t)
 
-	cfg := commonsysfs.Config{
+	cfg := genericlinux.Config{
 		DigitalInterrupts: []board.DigitalInterruptConfig{
 			{Name: "i1", Pin: "11"},                     // plug physical 12(18) into this (17)
 			{Name: "servo-i", Pin: "22", Type: "servo"}, // bcom-25
@@ -141,7 +142,7 @@ func TestPiHardware(t *testing.T) {
 	motorReg := registry.ComponentLookup(motor.Subtype, picommon.ModelName)
 	test.That(t, motorReg, test.ShouldNotBeNil)
 
-	encoderReg := registry.ComponentLookup(encoder.Subtype, "encoder")
+	encoderReg := registry.ComponentLookup(encoder.Subtype, resource.NewDefaultModel("encoder"))
 	test.That(t, encoderReg, test.ShouldNotBeNil)
 
 	deps := make(registry.Dependencies)

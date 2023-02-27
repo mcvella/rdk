@@ -5,7 +5,6 @@ import (
 	"context"
 
 	"github.com/edaniels/golog"
-	commonpb "go.viam.com/api/common/v1"
 	pb "go.viam.com/api/component/arm/v1"
 	"go.viam.com/utils"
 
@@ -16,18 +15,18 @@ import (
 	"go.viam.com/rdk/operation"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/registry"
+	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/robot"
 	"go.viam.com/rdk/spatialmath"
 )
 
-// ModelName defines the model name to be used when specifying wrapper arms in configs.
-const ModelName = "wrapper_arm"
-
 // AttrConfig is used for converting config attributes.
 type AttrConfig struct {
-	ModelPath string `json:"model-path"`
-	ArmName   string `json:"arm-name"`
+	ModelFilePath string `json:"model-path"`
+	ArmName       string `json:"arm-name"`
 }
+
+var model = resource.NewDefaultModel("wrapper_arm")
 
 // Validate ensures all parts of the config are valid.
 func (cfg *AttrConfig) Validate(path string) ([]string, error) {
@@ -40,13 +39,13 @@ func (cfg *AttrConfig) Validate(path string) ([]string, error) {
 }
 
 func init() {
-	registry.RegisterComponent(arm.Subtype, ModelName, registry.Component{
+	registry.RegisterComponent(arm.Subtype, model, registry.Component{
 		RobotConstructor: func(ctx context.Context, r robot.Robot, config config.Component, logger golog.Logger) (interface{}, error) {
 			return NewWrapperArm(config, r, logger)
 		},
 	})
 
-	config.RegisterComponentAttributeMapConverter(arm.SubtypeName, ModelName,
+	config.RegisterComponentAttributeMapConverter(arm.Subtype, model,
 		func(attributes config.AttributeMap) (interface{}, error) {
 			var conf AttrConfig
 			return config.TransformAttributeMapToStruct(&conf, attributes)
@@ -68,7 +67,8 @@ type Arm struct {
 
 // NewWrapperArm returns a wrapper component for another arm.
 func NewWrapperArm(cfg config.Component, r robot.Robot, logger golog.Logger) (arm.LocalArm, error) {
-	model, err := referenceframe.ParseModelJSONFile(cfg.ConvertedAttributes.(*AttrConfig).ModelPath, cfg.Name)
+	modelPath := cfg.ConvertedAttributes.(*AttrConfig).ModelFilePath
+	model, err := referenceframe.ModelFromPath(modelPath, cfg.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -96,14 +96,14 @@ func (wrapper *Arm) EndPosition(ctx context.Context, extra map[string]interface{
 	if err != nil {
 		return nil, err
 	}
-	return motionplan.ComputePosition(wrapper.model, joints)
+	return motionplan.ComputeOOBPosition(wrapper.model, joints)
 }
 
 // MoveToPosition sets the position.
 func (wrapper *Arm) MoveToPosition(
 	ctx context.Context,
 	pos spatialmath.Pose,
-	worldState *commonpb.WorldState,
+	worldState *referenceframe.WorldState,
 	extra map[string]interface{},
 ) error {
 	ctx, done := wrapper.opMgr.New(ctx)
@@ -113,6 +113,10 @@ func (wrapper *Arm) MoveToPosition(
 
 // MoveToJointPositions sets the joints.
 func (wrapper *Arm) MoveToJointPositions(ctx context.Context, joints *pb.JointPositions, extra map[string]interface{}) error {
+	// check that joint positions are not out of bounds
+	if err := arm.CheckDesiredJointPositions(ctx, wrapper, joints.Values); err != nil {
+		return err
+	}
 	ctx, done := wrapper.opMgr.New(ctx)
 	defer done()
 
@@ -152,5 +156,10 @@ func (wrapper *Arm) CurrentInputs(ctx context.Context) ([]referenceframe.Input, 
 
 // GoToInputs moves the arm to the specified goal inputs.
 func (wrapper *Arm) GoToInputs(ctx context.Context, goal []referenceframe.Input) error {
-	return wrapper.MoveToJointPositions(ctx, wrapper.model.ProtobufFromInput(goal), nil)
+	// check that joint positions are not out of bounds
+	positionDegs := wrapper.model.ProtobufFromInput(goal)
+	if err := arm.CheckDesiredJointPositions(ctx, wrapper, positionDegs.Values); err != nil {
+		return err
+	}
+	return wrapper.MoveToJointPositions(ctx, positionDegs, nil)
 }

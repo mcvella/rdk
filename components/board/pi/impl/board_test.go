@@ -12,7 +12,7 @@ import (
 	"go.viam.com/test"
 
 	"go.viam.com/rdk/components/board"
-	"go.viam.com/rdk/components/board/commonsysfs"
+	"go.viam.com/rdk/components/board/genericlinux"
 	picommon "go.viam.com/rdk/components/board/pi/common"
 	"go.viam.com/rdk/components/servo"
 	"go.viam.com/rdk/config"
@@ -23,7 +23,7 @@ func TestPiPigpio(t *testing.T) {
 	ctx := context.Background()
 	logger := golog.NewTestLogger(t)
 
-	cfg := commonsysfs.Config{
+	cfg := genericlinux.Config{
 		DigitalInterrupts: []board.DigitalInterruptConfig{
 			{Name: "i1", Pin: "11"}, // bcom 17
 			{Name: "servo-i", Pin: "22", Type: "servo"},
@@ -240,27 +240,35 @@ func TestPiPigpio(t *testing.T) {
 
 func TestServoFunctions(t *testing.T) {
 	t.Run("check servo math", func(t *testing.T) {
-		pw := angleToPulseWidth(1)
+		pw := angleToPulseWidth(1, servoDefaultMaxRotation)
 		test.That(t, pw, test.ShouldEqual, 511)
-		pw = angleToPulseWidth(0)
+		pw = angleToPulseWidth(0, servoDefaultMaxRotation)
 		test.That(t, pw, test.ShouldEqual, 500)
-		pw = angleToPulseWidth(179)
+		pw = angleToPulseWidth(179, servoDefaultMaxRotation)
 		test.That(t, pw, test.ShouldEqual, 2488)
-		pw = angleToPulseWidth(180)
+		pw = angleToPulseWidth(180, servoDefaultMaxRotation)
 		test.That(t, pw, test.ShouldEqual, 2500)
-		a := pulseWidthToAngle(511)
+		pw = angleToPulseWidth(179, 270)
+		test.That(t, pw, test.ShouldEqual, 1825)
+		pw = angleToPulseWidth(180, 270)
+		test.That(t, pw, test.ShouldEqual, 1833)
+		a := pulseWidthToAngle(511, servoDefaultMaxRotation)
 		test.That(t, a, test.ShouldEqual, 1)
-		a = pulseWidthToAngle(500)
+		a = pulseWidthToAngle(500, servoDefaultMaxRotation)
 		test.That(t, a, test.ShouldEqual, 0)
-		a = pulseWidthToAngle(2500)
+		a = pulseWidthToAngle(2500, servoDefaultMaxRotation)
 		test.That(t, a, test.ShouldEqual, 180)
-		a = pulseWidthToAngle(2488)
+		a = pulseWidthToAngle(2488, servoDefaultMaxRotation)
 		test.That(t, a, test.ShouldEqual, 179)
+		a = pulseWidthToAngle(1825, 270)
+		test.That(t, a, test.ShouldEqual, 179)
+		a = pulseWidthToAngle(1833, 270)
+		test.That(t, a, test.ShouldEqual, 180)
 	})
 
 	t.Run(("check Move IsMoving ande pigpio errors"), func(t *testing.T) {
 		ctx := context.Background()
-		s := &piPigpioServo{pinname: "1"}
+		s := &piPigpioServo{pinname: "1", maxRotation: 180}
 
 		s.res = -93
 		err := s.pigpioErrors(int(s.res))

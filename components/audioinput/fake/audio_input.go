@@ -18,6 +18,7 @@ import (
 	"go.viam.com/rdk/components/audioinput"
 	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/registry"
+	"go.viam.com/rdk/resource"
 )
 
 var _ = audioinput.AudioInput(&audioInput{})
@@ -25,7 +26,7 @@ var _ = audioinput.AudioInput(&audioInput{})
 func init() {
 	registry.RegisterComponent(
 		audioinput.Subtype,
-		"fake",
+		resource.NewDefaultModel("fake"),
 		registry.Component{Constructor: func(
 			_ context.Context,
 			_ registry.Dependencies,
@@ -154,5 +155,8 @@ func (i *audioInput) DoCommand(ctx context.Context, cmd map[string]interface{}) 
 func (i *audioInput) Close(ctx context.Context) error {
 	i.cancel()
 	i.activeBackgroundWorkers.Wait()
+	i.cond.L.Lock()
+	i.cond.Signal()
+	i.cond.L.Unlock()
 	return i.AudioSource.Close(ctx)
 }

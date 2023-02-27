@@ -23,29 +23,43 @@ type depthToPretty struct {
 	cameraModel    *transform.PinholeCameraModel
 }
 
+func propsFromVideoSource(ctx context.Context, source gostream.VideoSource) (camera.Properties, error) {
+	var camProps camera.Properties
+	if cameraSrc, ok := source.(camera.Camera); ok {
+		props, err := cameraSrc.Properties(ctx)
+		if err != nil {
+			return camProps, err
+		}
+		camProps = props
+	}
+	return camProps, nil
+}
+
 func newDepthToPrettyTransform(
 	ctx context.Context,
 	source gostream.VideoSource,
-	stream camera.StreamType,
-) (gostream.VideoSource, camera.StreamType, error) {
+	stream camera.ImageType,
+) (gostream.VideoSource, camera.ImageType, error) {
 	if stream != camera.DepthStream {
 		return nil, camera.UnspecifiedStream,
 			errors.Errorf("source has stream type %s, depth_to_pretty only supports depth stream inputs", stream)
 	}
-	var cameraModel *transform.PinholeCameraModel
-	if cameraSrc, ok := source.(camera.Camera); ok {
-		props, err := cameraSrc.Properties(ctx)
-		if err != nil {
-			return nil, camera.UnspecifiedStream, err
-		}
-		cameraModel = &transform.PinholeCameraModel{props.IntrinsicParams, props.DistortionParams}
+	props, err := propsFromVideoSource(ctx, source)
+	if err != nil {
+		return nil, camera.UnspecifiedStream, err
+	}
+	var cameraModel transform.PinholeCameraModel
+	cameraModel.PinholeCameraIntrinsics = props.IntrinsicParams
+
+	if props.DistortionParams != nil {
+		cameraModel.Distortion = props.DistortionParams
 	}
 	depthStream := gostream.NewEmbeddedVideoStream(source)
 	reader := &depthToPretty{
 		originalStream: depthStream,
-		cameraModel:    cameraModel,
+		cameraModel:    &cameraModel,
 	}
-	cam, err := camera.NewFromReader(ctx, reader, cameraModel, camera.ColorStream)
+	cam, err := camera.NewFromReader(ctx, reader, &cameraModel, camera.ColorStream)
 	return cam, camera.ColorStream, err
 }
 
@@ -100,9 +114,9 @@ type overlaySource struct {
 func newOverlayTransform(
 	ctx context.Context,
 	src gostream.VideoSource,
-	stream camera.StreamType,
+	stream camera.ImageType,
 	am config.AttributeMap,
-) (gostream.VideoSource, camera.StreamType, error) {
+) (gostream.VideoSource, camera.ImageType, error) {
 	conf, err := config.TransformAttributeMapToStruct(&(overlayAttrs{}), am)
 	if err != nil {
 		return nil, camera.UnspecifiedStream, err
@@ -111,13 +125,16 @@ func newOverlayTransform(
 	if !ok {
 		return nil, camera.UnspecifiedStream, rdkutils.NewUnexpectedTypeError(attrs, conf)
 	}
-	cameraModel := &transform.PinholeCameraModel{}
-	if cameraSrc, ok := src.(camera.Camera); ok {
-		props, err := cameraSrc.Properties(ctx)
-		if err != nil {
-			return nil, camera.UnspecifiedStream, err
-		}
-		cameraModel = &transform.PinholeCameraModel{props.IntrinsicParams, props.DistortionParams}
+
+	props, err := propsFromVideoSource(ctx, src)
+	if err != nil {
+		return nil, camera.UnspecifiedStream, err
+	}
+	var cameraModel transform.PinholeCameraModel
+	cameraModel.PinholeCameraIntrinsics = props.IntrinsicParams
+
+	if props.DistortionParams != nil {
+		cameraModel.Distortion = props.DistortionParams
 	}
 	if attrs.IntrinsicParams != nil && attrs.IntrinsicParams.Height > 0. &&
 		attrs.IntrinsicParams.Width > 0. && attrs.IntrinsicParams.Fx > 0. && attrs.IntrinsicParams.Fy > 0. {
@@ -126,8 +143,8 @@ func newOverlayTransform(
 	if cameraModel.PinholeCameraIntrinsics == nil {
 		return nil, camera.UnspecifiedStream, transform.ErrNoIntrinsics
 	}
-	reader := &overlaySource{src, cameraModel}
-	cam, err := camera.NewFromReader(ctx, reader, cameraModel, stream)
+	reader := &overlaySource{src, &cameraModel}
+	cam, err := camera.NewFromReader(ctx, reader, &cameraModel, stream)
 	return cam, stream, err
 }
 

@@ -14,7 +14,6 @@ import (
 	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/registry"
 	"go.viam.com/rdk/resource"
-	"go.viam.com/rdk/robot"
 	"go.viam.com/rdk/subtype"
 	"go.viam.com/rdk/utils"
 )
@@ -41,6 +40,7 @@ func init() {
 // Service defines what a Data Manager Service should expose to the users.
 type Service interface {
 	Sync(ctx context.Context, extra map[string]interface{}) error
+	resource.Generic
 }
 
 var (
@@ -51,7 +51,7 @@ var (
 
 // NewUnimplementedInterfaceError is used when there is a failed interface check.
 func NewUnimplementedInterfaceError(actual interface{}) error {
-	return utils.NewUnimplementedInterfaceError((Service)(nil), actual)
+	return utils.NewUnimplementedInterfaceError((*Service)(nil), actual)
 }
 
 // SubtypeName is the name of the type of service.
@@ -69,33 +69,6 @@ func Named(name string) resource.Name {
 	return resource.NameFromSubtype(Subtype, name)
 }
 
-// FromRobot is a helper for getting the named data manager service from the given Robot.
-func FromRobot(r robot.Robot, name string) (Service, error) {
-	resource, err := r.ResourceByName(Named(name))
-	if err != nil {
-		return nil, err
-	}
-	svc, ok := resource.(Service)
-	if !ok {
-		return nil, NewUnimplementedInterfaceError(resource)
-	}
-	return svc, nil
-}
-
-// FindFirstName returns name of first data manager service found.
-func FindFirstName(r robot.Robot) string {
-	for _, val := range robot.NamesBySubtype(r, Subtype) {
-		return val
-	}
-	return ""
-}
-
-// FirstFromRobot returns the first data manager service in this robot.
-func FirstFromRobot(r robot.Robot) (Service, error) {
-	name := FindFirstName(r)
-	return FromRobot(r, name)
-}
-
 type reconfigurableDataManager struct {
 	mu     sync.RWMutex
 	name   resource.Name
@@ -110,6 +83,14 @@ func (svc *reconfigurableDataManager) Sync(ctx context.Context, extra map[string
 	svc.mu.RLock()
 	defer svc.mu.RUnlock()
 	return svc.actual.Sync(ctx, extra)
+}
+
+func (svc *reconfigurableDataManager) DoCommand(ctx context.Context,
+	cmd map[string]interface{},
+) (map[string]interface{}, error) {
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+	return svc.actual.DoCommand(ctx, cmd)
 }
 
 func (svc *reconfigurableDataManager) Close(ctx context.Context) error {

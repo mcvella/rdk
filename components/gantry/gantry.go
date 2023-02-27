@@ -5,7 +5,6 @@ import (
 	"sync"
 
 	"github.com/edaniels/golog"
-	commonpb "go.viam.com/api/common/v1"
 	pb "go.viam.com/api/component/gantry/v1"
 	viamutils "go.viam.com/utils"
 	"go.viam.com/utils/rpc"
@@ -40,11 +39,11 @@ func init() {
 		},
 	})
 	data.RegisterCollector(data.MethodMetadata{
-		Subtype:    SubtypeName,
+		Subtype:    Subtype,
 		MethodName: position.String(),
 	}, newPositionCollector)
 	data.RegisterCollector(data.MethodMetadata{
-		Subtype:    SubtypeName,
+		Subtype:    Subtype,
 		MethodName: lengths.String(),
 	}, newLengthsCollector)
 }
@@ -72,7 +71,7 @@ type Gantry interface {
 	// MoveToPosition is in meters
 	// The worldState argument should be treated as optional by all implementing drivers
 	// This will block until done or a new operation cancels this one
-	MoveToPosition(ctx context.Context, positionsMm []float64, worldState *commonpb.WorldState, extra map[string]interface{}) error
+	MoveToPosition(ctx context.Context, positionsMm []float64, worldState *referenceframe.WorldState, extra map[string]interface{}) error
 
 	// Lengths is the length of gantries in meters
 	Lengths(ctx context.Context, extra map[string]interface{}) ([]float64, error)
@@ -83,6 +82,7 @@ type Gantry interface {
 	generic.Generic
 	referenceframe.ModelFramer
 	referenceframe.InputEnabled
+	resource.MovingCheckable
 }
 
 // FromDependencies is a helper for getting the named gantry from a collection of
@@ -102,36 +102,26 @@ func FromDependencies(deps registry.Dependencies, name string) (Gantry, error) {
 // A LocalGantry represents a Gantry that can report whether it is moving or not.
 type LocalGantry interface {
 	Gantry
-
-	resource.MovingCheckable
 }
 
 // NewUnimplementedInterfaceError is used when there is a failed interface check.
 func NewUnimplementedInterfaceError(actual interface{}) error {
-	return utils.NewUnimplementedInterfaceError((Gantry)(nil), actual)
+	return utils.NewUnimplementedInterfaceError((*Gantry)(nil), actual)
 }
 
 // NewUnimplementedLocalInterfaceError is used when there is a failed interface check.
 func NewUnimplementedLocalInterfaceError(actual interface{}) error {
-	return utils.NewUnimplementedInterfaceError((Gantry)(nil), actual)
+	return utils.NewUnimplementedInterfaceError((*Gantry)(nil), actual)
 }
 
 // DependencyTypeError is used when a resource doesn't implement the expected interface.
-func DependencyTypeError(name, actual interface{}) error {
-	return utils.DependencyTypeError(name, (Gantry)(nil), actual)
+func DependencyTypeError(name string, actual interface{}) error {
+	return utils.DependencyTypeError(name, (*Gantry)(nil), actual)
 }
 
 // FromRobot is a helper for getting the named gantry from the given Robot.
 func FromRobot(r robot.Robot, name string) (Gantry, error) {
-	res, err := r.ResourceByName(Named(name))
-	if err != nil {
-		return nil, err
-	}
-	part, ok := res.(Gantry)
-	if !ok {
-		return nil, NewUnimplementedInterfaceError(res)
-	}
-	return part, nil
+	return robot.ResourceFromRobot[Gantry](r, Named(name))
 }
 
 // NamesFromRobot is a helper for getting all gantry names from the given Robot.
@@ -141,7 +131,7 @@ func NamesFromRobot(r robot.Robot) []string {
 
 // CreateStatus creates a status from the gantry.
 func CreateStatus(ctx context.Context, resource interface{}) (*pb.Status, error) {
-	gantry, ok := resource.(LocalGantry)
+	gantry, ok := resource.(Gantry)
 	if !ok {
 		return nil, NewUnimplementedLocalInterfaceError(resource)
 	}
@@ -231,7 +221,7 @@ func (g *reconfigurableGantry) Lengths(ctx context.Context, extra map[string]int
 func (g *reconfigurableGantry) MoveToPosition(
 	ctx context.Context,
 	positionsMm []float64,
-	worldState *commonpb.WorldState,
+	worldState *referenceframe.WorldState,
 	extra map[string]interface{},
 ) error {
 	g.mu.Lock()
@@ -286,6 +276,12 @@ func (g *reconfigurableGantry) GoToInputs(ctx context.Context, goal []referencef
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.actual.GoToInputs(ctx, goal)
+}
+
+func (g *reconfigurableGantry) IsMoving(ctx context.Context) (bool, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.actual.IsMoving(ctx)
 }
 
 type reconfigurableLocalGantry struct {

@@ -31,6 +31,7 @@ import (
 	v1 "go.viam.com/api/common/v1"
 	pb "go.viam.com/api/service/slam/v1"
 	"go.viam.com/rdk/components/camera"
+	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/config"
 	pc "go.viam.com/rdk/pointcloud"
 	"go.viam.com/rdk/referenceframe"
@@ -42,6 +43,7 @@ import (
 	"go.viam.com/rdk/spatialmath"
 	rdkutils "go.viam.com/rdk/utils"
 	"go.viam.com/rdk/vision"
+	slamConfig "go.viam.com/slam/config"
 	"go.viam.com/utils"
 )
 
@@ -74,39 +76,43 @@ func SetDialMaxTimeoutSecForTesting(val int) {
 
 // TBD 05/04/2022: Needs more work once GRPC is included (future PR).
 func init() {
-	registry.RegisterService(slam.Subtype, resource.DefaultModelName, registry.Service{
-		Constructor: func(ctx context.Context, deps registry.Dependencies, c config.Service, logger golog.Logger) (interface{}, error) {
-			return NewBuiltIn(ctx, deps, c, logger, false)
-		},
-	})
-	cType := config.ServiceType(slam.SubtypeName)
-	config.RegisterServiceAttributeMapConverter(cType, func(attributes config.AttributeMap) (interface{}, error) {
-		var conf AttrConfig
-		decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{TagName: "json", Result: &conf})
-		if err != nil {
-			return nil, err
-		}
-		if err := decoder.Decode(attributes); err != nil {
-			return nil, err
-		}
-		return &conf, nil
-	}, &AttrConfig{})
+	for _, slamLibrary := range slam.SLAMLibraries {
+		// TODO(PRODUCT-266): use triplet model names more properly here
+		sModel := resource.NewDefaultModel(resource.ModelName(slamLibrary.AlgoName))
+		registry.RegisterService(slam.Subtype, sModel, registry.Service{
+			Constructor: func(ctx context.Context, deps registry.Dependencies, c config.Service, logger golog.Logger) (interface{}, error) {
+				return NewBuiltIn(ctx, deps, c, logger, false)
+			},
+		})
+		cType := slam.Subtype
+		config.RegisterServiceAttributeMapConverter(cType, sModel, func(attributes config.AttributeMap) (interface{}, error) {
+			var conf AttrConfig
+			decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{TagName: "json", Result: &conf})
+			if err != nil {
+				return nil, err
+			}
+			if err := decoder.Decode(attributes); err != nil {
+				return nil, err
+			}
+			return &conf, nil
+		}, &AttrConfig{})
+	}
 }
 
 // RuntimeConfigValidation ensures that required config parameters are valid at runtime. If any of the required config parameters are
 // not valid, this function will throw a warning, but not close out/shut down the server. The required parameters that are checked here
 // are: 'algorithm', 'data_dir', and 'config_param' (required due to the 'mode' parameter internal to it).
 // Returns the slam mode.
-func RuntimeConfigValidation(svcConfig *AttrConfig, logger golog.Logger) (slam.Mode, error) {
-	slamLib, ok := slam.SLAMLibraries[svcConfig.Algorithm]
+func RuntimeConfigValidation(svcConfig *AttrConfig, model string, logger golog.Logger) (slam.Mode, error) {
+	slamLib, ok := slam.SLAMLibraries[model]
 	if !ok {
-		return "", errors.Errorf("%v algorithm specified not in implemented list", svcConfig.Algorithm)
+		return "", errors.Errorf("%v algorithm specified not in implemented list", model)
 	}
 
 	slamMode, ok := slamLib.SlamMode[svcConfig.ConfigParams["mode"]]
 	if !ok {
 		return "", errors.Errorf("getting data with specified algorithm %v, and desired mode %v",
-			svcConfig.Algorithm, svcConfig.ConfigParams["mode"])
+			model, svcConfig.ConfigParams["mode"])
 	}
 
 	for _, directoryName := range [4]string{"", "data", "map", "config"} {
@@ -185,14 +191,13 @@ func RuntimeConfigValidation(svcConfig *AttrConfig, logger golog.Logger) (slam.M
 
 // runtimeServiceValidation ensures the service's data processing and saving is valid for the mode and
 // cameras given.
-
 func runtimeServiceValidation(
 	ctx context.Context,
 	cams []camera.Camera,
 	camStreams []gostream.VideoStream,
 	slamSvc *builtIn,
 ) error {
-	if len(cams) == 0 {
+	if !slamSvc.useLiveData {
 		return nil
 	}
 
@@ -249,21 +254,20 @@ func runtimeServiceValidation(
 
 // AttrConfig describes how to configure the service.
 type AttrConfig struct {
-	Sensors          []string          `json:"sensors"`
-	Algorithm        string            `json:"algorithm"`
-	ConfigParams     map[string]string `json:"config_params"`
-	DataRateMs       int               `json:"data_rate_msec"`
-	MapRateSec       *int              `json:"map_rate_sec"`
-	DataDirectory    string            `json:"data_dir"`
-	InputFilePattern string            `json:"input_file_pattern"`
-	Port             string            `json:"port"`
+	Sensors             []string          `json:"sensors"`
+	ConfigParams        map[string]string `json:"config_params"`
+	DataDirectory       string            `json:"data_dir"`
+	UseLiveData         *bool             `json:"use_live_data"`
+	DataRateMs          int               `json:"data_rate_msec"`
+	MapRateSec          *int              `json:"map_rate_sec"`
+	InputFilePattern    string            `json:"input_file_pattern"`
+	Port                string            `json:"port"`
+	DeleteProcessedData *bool             `json:"delete_processed_data"`
+	Dev                 bool              `json:"dev"`
 }
 
 // Validate creates the list of implicit dependencies.
 func (config *AttrConfig) Validate(path string) ([]string, error) {
-	if config.Algorithm == "" {
-		return nil, utils.NewConfigValidationFieldRequiredError(path, "algorithm")
-	}
 
 	if config.ConfigParams["mode"] == "" {
 		return nil, utils.NewConfigValidationFieldRequiredError(path, "config_params[mode]")
@@ -273,6 +277,10 @@ func (config *AttrConfig) Validate(path string) ([]string, error) {
 		return nil, utils.NewConfigValidationFieldRequiredError(path, "data_dir")
 	}
 
+	if config.UseLiveData == nil {
+		return nil, utils.NewConfigValidationFieldRequiredError(path, "use_live_data")
+	}
+
 	deps := config.Sensors
 
 	return deps, nil
@@ -280,6 +288,7 @@ func (config *AttrConfig) Validate(path string) ([]string, error) {
 
 // builtIn is the structure of the slam service.
 type builtIn struct {
+	generic.Unimplemented
 	cameraName      string
 	slamLib         slam.LibraryMetadata
 	slamMode        slam.Mode
@@ -287,13 +296,17 @@ type builtIn struct {
 	clientAlgo      pb.SLAMServiceClient
 	clientAlgoClose func() error
 
-	configParams     map[string]string
-	dataDirectory    string
-	inputFilePattern string
+	configParams        map[string]string
+	dataDirectory       string
+	inputFilePattern    string
+	deleteProcessedData bool
+	useLiveData         bool
 
 	port       string
 	dataRateMs int
 	mapRateSec int
+
+	dev bool
 
 	camStreams []gostream.VideoStream
 
@@ -335,11 +348,27 @@ func configureCameras(ctx context.Context, svcConfig *AttrConfig, deps registry.
 			if !ok {
 				return "", nil, transform.NewNoIntrinsicsError("Intrinsics do not exist")
 			}
+
 			err = intrinsics.CheckValid()
 			if err != nil {
 				return "", nil, err
 			}
+
+			props, err := cam.Properties(ctx)
+			if err != nil {
+				return "", nil, errors.Wrap(err, "error getting camera properties for slam service")
+			}
+
+			brownConrady, ok := props.DistortionParams.(*transform.BrownConrady)
+			if !ok {
+				return "", nil, errors.New("error getting distortion_parameters for slam service, only BrownConrady distortion parameters are supported")
+			}
+			if err := brownConrady.CheckValid(); err != nil {
+				return "", nil, errors.Wrapf(err, "error validating distortion_parameters for slam service")
+
+			}
 		}
+
 		cams = append(cams, cam)
 
 		// If there is a second camera, it is expected to be depth.
@@ -370,7 +399,11 @@ func setupGRPCConnection(ctx context.Context, port string, logger golog.Logger) 
 	// The 'port' provided in the config is already expected to include "localhost:", if needed, so that it doesn't need to be
 	// added anywhere in the code. This will allow cloud-based SLAM processing to exist in the future.
 	// TODO: add credentials when running SLAM processing in the cloud.
-	connLib, err := grpc.DialContext(ctx, port, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+
+	// Increasing the gRPC max message size from the default value of 4MB to 32MB, to match the limit that is set in RDK. This is
+	// necessary for transmitting large pointclouds.
+	maxMsgSizeOption := grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(32 * 1024 * 1024))
+	connLib, err := grpc.DialContext(ctx, port, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock(), maxMsgSizeOption)
 	if err != nil {
 		logger.Errorw("error connecting to slam process", "error", err)
 		return nil, nil, err
@@ -388,20 +421,39 @@ func (slamSvc *builtIn) Position(ctx context.Context, name string, extra map[str
 	if err != nil {
 		return nil, err
 	}
-	req := &pb.GetPositionRequest{Name: name, Extra: ext}
 
-	resp, err := slamSvc.clientAlgo.GetPosition(ctx, req)
-	if err != nil {
-		return nil, errors.Wrap(err, "error getting SLAM position")
+	var pInFrame *referenceframe.PoseInFrame
+	var returnedExt map[string]interface{}
+
+	// TODO: Once RSDK-1053 (https://viam.atlassian.net/browse/RSDK-1066) is complete the original code before extracting position
+	// from GetPosition will be removed and the GetPositionNew -> GetPosition
+	if slamSvc.dev {
+		slamSvc.logger.Debug("IN DEV MODE (position request)")
+		req := &pb.GetPositionNewRequest{Name: name}
+
+		resp, err := slamSvc.clientAlgo.GetPositionNew(ctx, req)
+		if err != nil {
+			return nil, errors.Wrap(err, "error getting SLAM position")
+		}
+
+		pInFrame = referenceframe.NewPoseInFrame(resp.GetComponentReference(), spatialmath.NewPoseFromProtobuf(resp.GetPose()))
+		returnedExt = resp.Extra.AsMap()
+
+	} else {
+		req := &pb.GetPositionRequest{Name: name, Extra: ext}
+
+		resp, err := slamSvc.clientAlgo.GetPosition(ctx, req)
+		if err != nil {
+			return nil, errors.Wrap(err, "error getting SLAM position")
+		}
+
+		pInFrame = referenceframe.ProtobufToPoseInFrame(resp.Pose)
+		returnedExt = resp.Extra.AsMap()
 	}
-
-	pInFrame := referenceframe.ProtobufToPoseInFrame(resp.Pose)
 
 	// TODO DATA-531: https://viam.atlassian.net/jira/software/c/projects/DATA/boards/30?modal=detail&selectedIssue=DATA-531
 	// Remove extraction and conversion of quaternion from the extra field in the response once the Rust
 	// spatial math library is available and the desired math can be implemented on the orbSLAM side
-	returnedExt := resp.Extra.AsMap()
-
 	if val, ok := returnedExt["quat"]; ok {
 		q := val.(map[string]interface{})
 
@@ -414,9 +466,9 @@ func (slamSvc *builtIn) Position(ctx context.Context, name string, extra map[str
 			slamSvc.logger.Debugf("quaternion given, but invalid format detected, %v, skipping quaternion transform", q)
 			return pInFrame, nil
 		}
-		newPose := spatialmath.NewPoseFromOrientation(pInFrame.Pose().Point(),
+		newPose := spatialmath.NewPose(pInFrame.Pose().Point(),
 			&spatialmath.Quaternion{Real: valReal, Imag: valIMag, Jmag: valJMag, Kmag: valKMag})
-		pInFrame = referenceframe.NewPoseInFrame(pInFrame.FrameName(), newPose)
+		pInFrame = referenceframe.NewPoseInFrame(pInFrame.Parent(), newPose)
 	}
 
 	return pInFrame, nil
@@ -445,34 +497,33 @@ func (slamSvc *builtIn) GetMap(
 	if err != nil {
 		return "", nil, nil, err
 	}
-	req := &pb.GetMapRequest{
-		Name:               name,
-		MimeType:           mimeType,
-		CameraPosition:     cameraPosition,
-		IncludeRobotMarker: include,
-		Extra:              ext,
-	}
 
 	var imData image.Image
 	var vObj *vision.Object
 
-	resp, err := slamSvc.clientAlgo.GetMap(ctx, req)
-	if err != nil {
-		return "", imData, vObj, errors.Errorf("error getting SLAM map (%v) : %v", mimeType, err)
-	}
+	// TODO: Once RSDK-1053 (https://viam.atlassian.net/browse/RSDK-1066) is complete the original code that extracts
+	// the map will be removed and GetMap will be changed to GetPointCloudMap
+	if slamSvc.dev {
+		slamSvc.logger.Debug("IN DEV MODE (map request)")
 
-	switch mimeType {
-	case rdkutils.MimeTypeJPEG:
-		imData, err = jpeg.Decode(bytes.NewReader(resp.GetImage()))
-		if err != nil {
-			return "", nil, nil, errors.Wrap(err, "get map decode image failed")
+		reqPCMap := &pb.GetPointCloudMapRequest{
+			Name: name,
 		}
-	case rdkutils.MimeTypePCD:
-		pointcloudData := resp.GetPointCloud()
+
+		if mimeType != rdkutils.MimeTypePCD {
+			return "", nil, nil, errors.New("non-pcd return type is impossible in while in dev mode")
+		}
+
+		resp, err := slamSvc.clientAlgo.GetPointCloudMap(ctx, reqPCMap)
+
+		if err != nil {
+			return "", imData, vObj, errors.Errorf("error getting SLAM map (%v) : %v", mimeType, err)
+		}
+		pointcloudData := resp.GetPointCloudPcd()
 		if pointcloudData == nil {
 			return "", nil, nil, errors.New("get map read pointcloud unavailable")
 		}
-		pc, err := pc.ReadPCD(bytes.NewReader(pointcloudData.PointCloud))
+		pc, err := pc.ReadPCD(bytes.NewReader(pointcloudData))
 		if err != nil {
 			return "", nil, nil, errors.Wrap(err, "get map read pointcloud failed")
 		}
@@ -481,9 +532,84 @@ func (slamSvc *builtIn) GetMap(
 		if err != nil {
 			return "", nil, nil, errors.Wrap(err, "get map creating vision object failed")
 		}
+
+		mimeType = rdkutils.MimeTypePCD
+	} else {
+
+		req := &pb.GetMapRequest{
+			Name:               name,
+			MimeType:           mimeType,
+			CameraPosition:     cameraPosition,
+			IncludeRobotMarker: include,
+			Extra:              ext,
+		}
+
+		resp, err := slamSvc.clientAlgo.GetMap(ctx, req)
+
+		if err != nil {
+			return "", imData, vObj, errors.Errorf("error getting SLAM map (%v) : %v", mimeType, err)
+		}
+
+		switch mimeType {
+		case rdkutils.MimeTypeJPEG:
+			imData, err = jpeg.Decode(bytes.NewReader(resp.GetImage()))
+			if err != nil {
+				return "", nil, nil, errors.Wrap(err, "get map decode image failed")
+			}
+		case rdkutils.MimeTypePCD:
+			pointcloudData := resp.GetPointCloud()
+			if pointcloudData == nil {
+				return "", nil, nil, errors.New("get map read pointcloud unavailable")
+			}
+			pc, err := pc.ReadPCD(bytes.NewReader(pointcloudData.PointCloud))
+			if err != nil {
+				return "", nil, nil, errors.Wrap(err, "get map read pointcloud failed")
+			}
+
+			vObj, err = vision.NewObject(pc)
+			if err != nil {
+				return "", nil, nil, errors.Wrap(err, "get map creating vision object failed")
+			}
+		}
+		mimeType = resp.MimeType
 	}
 
-	return resp.MimeType, imData, vObj, nil
+	return mimeType, imData, vObj, nil
+}
+
+// GetInternalState forwards the request for the SLAM algorithms's internal state. Once a response is received, it is returned
+// to the user.
+func (slamSvc *builtIn) GetInternalState(ctx context.Context, name string) ([]byte, error) {
+	ctx, span := trace.StartSpan(ctx, "slam::builtIn::GetInternalState")
+	defer span.End()
+
+	req := &pb.GetInternalStateRequest{Name: name}
+
+	resp, err := slamSvc.clientAlgo.GetInternalState(ctx, req)
+	if err != nil {
+		return nil, errors.Wrap(err, "error getting the internal state from the SLAM client")
+	}
+
+	internalState := resp.GetInternalState()
+	return internalState, err
+}
+
+// GetPointCloudMapStream creates a request, calls the slam algorithms GetPointCloudMapStream endpoint and returns a callback
+// function which will return the next chunk of the current pointcloud map.
+func (slamSvc *builtIn) GetPointCloudMapStream(ctx context.Context, name string) (func() ([]byte, error), error) {
+	ctx, span := trace.StartSpan(ctx, "slam::builtIn::GetPointCloudMapStream")
+	defer span.End()
+
+	return nil, errors.New("unimplemented stub")
+}
+
+// GetInternalStateStream creates a request, calls the slam algorithms GetInternalStateStream endpoint and returns a callback
+// function which will return the next chunk of the current internal state of the slam algo.
+func (slamSvc *builtIn) GetInternalStateStream(ctx context.Context, name string) (func() ([]byte, error), error) {
+	ctx, span := trace.StartSpan(ctx, "slam::builtIn::GetInternalStateStream")
+	defer span.End()
+
+	return nil, errors.New("unimplemented stub")
 }
 
 // NewBuiltIn returns a new slam service for the given robot.
@@ -501,7 +627,7 @@ func NewBuiltIn(ctx context.Context, deps registry.Dependencies, config config.S
 		return nil, errors.Wrap(err, "configuring camera error")
 	}
 
-	slamMode, err := RuntimeConfigValidation(svcConfig, logger)
+	slamMode, err := RuntimeConfigValidation(svcConfig, string(config.Model.Name), logger)
 	if err != nil {
 		return nil, errors.Wrap(err, "runtime slam config error")
 	}
@@ -532,6 +658,12 @@ func NewBuiltIn(ctx context.Context, deps registry.Dependencies, config config.S
 		mapRate = *svcConfig.MapRateSec
 	}
 
+	useLiveData, err := slamConfig.DetermineUseLiveData(logger, svcConfig.UseLiveData, svcConfig.Sensors)
+	if err != nil {
+		return nil, err
+	}
+	deleteProcessedData := slamConfig.DetermineDeleteProcessedData(logger, svcConfig.DeleteProcessedData, useLiveData)
+
 	camStreams := make([]gostream.VideoStream, 0, len(cams))
 	for _, cam := range cams {
 		camStreams = append(camStreams, gostream.NewEmbeddedVideoStream(cam))
@@ -542,12 +674,14 @@ func NewBuiltIn(ctx context.Context, deps registry.Dependencies, config config.S
 	// SLAM Service Object
 	slamSvc := &builtIn{
 		cameraName:            cameraName,
-		slamLib:               slam.SLAMLibraries[svcConfig.Algorithm],
+		slamLib:               slam.SLAMLibraries[string(config.Model.Name)],
 		slamMode:              slamMode,
 		slamProcess:           pexec.NewProcessManager(logger),
 		configParams:          svcConfig.ConfigParams,
 		dataDirectory:         svcConfig.DataDirectory,
+		useLiveData:           useLiveData,
 		inputFilePattern:      svcConfig.InputFilePattern,
+		deleteProcessedData:   deleteProcessedData,
 		port:                  port,
 		dataRateMs:            dataRate,
 		mapRateSec:            mapRate,
@@ -555,6 +689,7 @@ func NewBuiltIn(ctx context.Context, deps registry.Dependencies, config config.S
 		cancelFunc:            cancelFunc,
 		logger:                logger,
 		bufferSLAMProcessLogs: bufferSLAMProcessLogs,
+		dev:                   svcConfig.Dev,
 	}
 
 	var success bool
@@ -627,7 +762,7 @@ func (slamSvc *builtIn) StartDataProcess(
 	camStreams []gostream.VideoStream,
 	c chan int,
 ) {
-	if len(cams) == 0 {
+	if !slamSvc.useLiveData {
 		return
 	}
 
@@ -700,6 +835,8 @@ func (slamSvc *builtIn) GetSLAMProcessConfig() pexec.ProcessConfig {
 	args = append(args, "-map_rate_sec="+strconv.Itoa(slamSvc.mapRateSec))
 	args = append(args, "-data_dir="+slamSvc.dataDirectory)
 	args = append(args, "-input_file_pattern="+slamSvc.inputFilePattern)
+	args = append(args, "-delete_processed_data="+strconv.FormatBool(slamSvc.deleteProcessedData))
+	args = append(args, "-use_live_data="+strconv.FormatBool(slamSvc.useLiveData))
 	args = append(args, "-port="+slamSvc.port)
 	args = append(args, "--aix-auto-update")
 

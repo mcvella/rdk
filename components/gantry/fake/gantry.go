@@ -7,17 +7,17 @@ import (
 
 	"github.com/edaniels/golog"
 	"github.com/golang/geo/r3"
-	commonpb "go.viam.com/api/common/v1"
 
 	"go.viam.com/rdk/components/gantry"
 	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/registry"
+	"go.viam.com/rdk/resource"
 )
 
 func init() {
-	registry.RegisterComponent(gantry.Subtype, "fake", registry.Component{
+	registry.RegisterComponent(gantry.Subtype, resource.NewDefaultModel("fake"), registry.Component{
 		Constructor: func(ctx context.Context, _ registry.Dependencies, config config.Component, logger golog.Logger) (interface{}, error) {
 			return NewGantry(config.Name), nil
 		},
@@ -53,7 +53,7 @@ func (g *Gantry) Lengths(ctx context.Context, extra map[string]interface{}) ([]f
 func (g *Gantry) MoveToPosition(
 	ctx context.Context,
 	positionsMm []float64,
-	worldState *commonpb.WorldState,
+	worldState *referenceframe.WorldState,
 	extra map[string]interface{},
 ) error {
 	g.positionsMm = positionsMm
@@ -92,5 +92,5 @@ func (g *Gantry) CurrentInputs(ctx context.Context) ([]referenceframe.Input, err
 
 // GoToInputs moves using the Gantry frames..
 func (g *Gantry) GoToInputs(ctx context.Context, goal []referenceframe.Input) error {
-	return g.MoveToPosition(ctx, referenceframe.InputsToFloats(goal), &commonpb.WorldState{}, nil)
+	return g.MoveToPosition(ctx, referenceframe.InputsToFloats(goal), &referenceframe.WorldState{}, nil)
 }

@@ -23,7 +23,7 @@ import (
 	"go.viam.com/utils"
 
 	"go.viam.com/rdk/components/board"
-	"go.viam.com/rdk/components/board/commonsysfs"
+	"go.viam.com/rdk/components/board/genericlinux"
 	picommon "go.viam.com/rdk/components/board/pi/common"
 	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/config"
@@ -42,7 +42,7 @@ func init() {
 			config config.Component,
 			logger golog.Logger,
 		) (interface{}, error) {
-			boardConfig, ok := config.ConvertedAttributes.(*commonsysfs.Config)
+			boardConfig, ok := config.ConvertedAttributes.(*genericlinux.Config)
 			if !ok {
 				return nil, rdkutils.NewUnexpectedTypeError(boardConfig, config.ConvertedAttributes)
 			}
@@ -54,27 +54,29 @@ func init() {
 // accessed via pigpio.
 type piPigpio struct {
 	generic.Unimplemented
-	mu            sync.Mutex
-	cfg           *commonsysfs.Config
-	duty          int // added for mutex
-	gpioConfigSet map[int]bool
-	analogs       map[string]board.AnalogReader
-	i2cs          map[string]board.I2C
-	spis          map[string]board.SPI
-	interrupts    map[string]board.DigitalInterrupt
-	interruptsHW  map[uint]board.DigitalInterrupt
-	logger        golog.Logger
-	isClosed      bool
+	mu              sync.Mutex
+	interruptCtx    context.Context
+	interruptCancel context.CancelFunc
+	cfg             *genericlinux.Config
+	duty            int // added for mutex
+	gpioConfigSet   map[int]bool
+	analogs         map[string]board.AnalogReader
+	i2cs            map[string]board.I2C
+	spis            map[string]board.SPI
+	interrupts      map[string]board.DigitalInterrupt
+	interruptsHW    map[uint]board.DigitalInterrupt
+	logger          golog.Logger
+	isClosed        bool
 }
 
 var (
 	pigpioInitialized bool
-	instanceMu        sync.Mutex
+	instanceMu        sync.RWMutex
 	instances         = map[*piPigpio]struct{}{}
 )
 
 // NewPigpio makes a new pigpio based Board using the given config.
-func NewPigpio(ctx context.Context, cfg *commonsysfs.Config, logger golog.Logger) (board.LocalBoard, error) {
+func NewPigpio(ctx context.Context, cfg *genericlinux.Config, logger golog.Logger) (board.LocalBoard, error) {
 	// this is so we can run it inside a daemon
 	internals := C.gpioCfgGetInternals()
 	internals |= C.PI_CFG_NOSIGHANDLER
@@ -84,7 +86,14 @@ func NewPigpio(ctx context.Context, cfg *commonsysfs.Config, logger golog.Logger
 	}
 
 	// setup
-	piInstance := &piPigpio{cfg: cfg, logger: logger, isClosed: false}
+	cancelCtx, cancelFunc := context.WithCancel(ctx)
+	piInstance := &piPigpio{
+		cfg:             cfg,
+		logger:          logger,
+		isClosed:        false,
+		interruptCtx:    cancelCtx,
+		interruptCancel: cancelFunc,
+	}
 
 	instanceMu.Lock()
 	logger.Info("initializing pigpio C library")
@@ -362,6 +371,7 @@ func (s *piPigpioSPIHandle) Xfer(ctx context.Context, baud uint, chipSelect stri
 		return nil, errors.New("pi SPI cannot use both native CS pins and extended/gpio CS pins at the same time")
 	}
 
+	//nolint:dupword
 	// Bitfields for mode
 	// Mode POL PHA
 	// 0    0   0
@@ -530,6 +540,7 @@ func (pi *piPigpio) Close(ctx context.Context) error {
 		return nil
 	}
 	pi.mu.Unlock()
+	pi.interruptCancel()
 	instanceMu.Lock()
 	if len(instances) == 1 {
 		terminate = true
@@ -586,8 +597,8 @@ func pigpioInterruptCallback(gpio, level int, rawTick uint32) {
 
 	tick := (uint64(tickRollevers) * uint64(math.MaxUint32)) + uint64(rawTick)
 
-	instanceMu.Lock()
-	defer instanceMu.Unlock()
+	instanceMu.RLock()
+	defer instanceMu.RUnlock()
 	for instance := range instances {
 		i := instance.interruptsHW[uint(gpio)]
 		if i == nil {
@@ -600,7 +611,7 @@ func pigpioInterruptCallback(gpio, level int, rawTick uint32) {
 		}
 		// this should *not* block for long otherwise the lock
 		// will be held
-		err := i.Tick(context.TODO(), high, tick*1000)
+		err := i.Tick(instance.interruptCtx, high, tick*1000)
 		if err != nil {
 			instance.logger.Error(err)
 		}

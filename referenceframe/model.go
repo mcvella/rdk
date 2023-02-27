@@ -8,20 +8,25 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/pkg/errors"
 	"go.uber.org/multierr"
 	pb "go.viam.com/api/component/arm/v1"
 
 	"go.viam.com/rdk/spatialmath"
 )
 
+// errUnsupportedFileType is returned if we try to build a model from an inproper extension.
+var errUnsupportedFileType = errors.New("only files with .json and .urdf file extensions are supported")
+
 // ModelFramer has a method that returns the kinematics information needed to build a dynamic referenceframe.
 type ModelFramer interface {
 	ModelFrame() Model
 }
 
-// A Model represents a frame that can change its name.
+// A Model represents a frame that can change its name, and can return itself as a ModelConfig struct.
 type Model interface {
 	Frame
+	ModelConfig() *ModelConfig
 	ChangeName(string)
 }
 
@@ -30,6 +35,7 @@ type SimpleModel struct {
 	*baseFrame
 	// OrdTransforms is the list of transforms ordered from end effector to base
 	OrdTransforms []Frame
+	modelConfig   *ModelConfig
 	poseCache     *sync.Map
 	lock          sync.RWMutex
 }
@@ -60,6 +66,11 @@ func GenerateRandomConfiguration(m Model, randSeed *rand.Rand) []float64 {
 // ChangeName changes the name of this model - necessary for building frame systems.
 func (m *SimpleModel) ChangeName(name string) {
 	m.name = name
+}
+
+// ModelConfig returns the ModelConfig object used to create this model.
+func (m *SimpleModel) ModelConfig() *ModelConfig {
+	return m.modelConfig
 }
 
 // Transform takes a model and a list of joint angles in radians and computes the dual quaternion representing the
@@ -109,13 +120,15 @@ func (m *SimpleModel) Geometries(inputs []Input) (*GeometriesInFrame, error) {
 	var errAll error
 	geometryMap := make(map[string]spatialmath.Geometry)
 	for _, frame := range frames {
-		geometry, err := frame.Geometries([]Input{})
-		if geometry == nil {
+		geometriesInFrame, err := frame.Geometries([]Input{})
+		if geometriesInFrame == nil {
 			// only propagate errors that result in nil geometry
 			multierr.AppendInto(&errAll, err)
 			continue
 		}
-		geometryMap[m.name+":"+frame.Name()] = geometry.Geometries()[frame.Name()].Transform(frame.transform)
+		for geomName, geom := range geometriesInFrame.Geometries() {
+			geometryMap[m.name+":"+geomName] = geom.Transform(frame.transform)
+		}
 	}
 	return NewGeometriesInFrame(m.name, geometryMap), errAll
 }
@@ -147,7 +160,7 @@ func (m *SimpleModel) DoF() []Limit {
 	}
 	m.lock.RUnlock()
 
-	limits := make([]Limit, 0, len(m.OrdTransforms)-1)
+	limits := make([]Limit, 0, len(m.OrdTransforms))
 	for _, transform := range m.OrdTransforms {
 		if len(transform.DoF()) > 0 {
 			limits = append(limits, transform.DoF()...)
@@ -161,11 +174,7 @@ func (m *SimpleModel) DoF() []Limit {
 
 // MarshalJSON serializes a Model.
 func (m *SimpleModel) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string]interface{}{
-		"name":                 m.name,
-		"kinematic_param_type": "frames",
-		"frames":               m.OrdTransforms,
-	})
+	return json.Marshal(m.modelConfig)
 }
 
 // AlmostEquals returns true if the only difference between this model and another is floating point inprecision.
@@ -198,7 +207,7 @@ func (m *SimpleModel) AlmostEquals(otherFrame Frame) bool {
 // between quaternions and OV are not needed.
 func (m *SimpleModel) inputsToFrames(inputs []Input, collectAll bool) ([]*staticFrame, error) {
 	if len(m.DoF()) != len(inputs) {
-		return nil, NewIncorrectInputLengthError(len(inputs), len(m.limits))
+		return nil, NewIncorrectInputLengthError(len(inputs), len(m.DoF()))
 	}
 	var err error
 	poses := make([]*staticFrame, 0, len(m.OrdTransforms))
@@ -239,4 +248,50 @@ func floatsToString(inputs []Input) string {
 		binary.BigEndian.PutUint64(b[8*i:8*i+8], math.Float64bits(input.Value))
 	}
 	return string(b)
+}
+
+// Create an ordered list of transforms given a parent mapping, keeping an eye out for a sentinel string (World).
+func sortTransforms(unsorted map[string]Frame, parentMap map[string]string, start, finish string) ([]Frame, error) {
+	seen := map[string]bool{}
+
+	nextTransform := unsorted[start]
+	orderedTransforms := []Frame{nextTransform}
+	seen[start] = true
+	for {
+		parent := parentMap[nextTransform.Name()]
+		if seen[parent] {
+			return nil, ErrCircularReference
+		}
+		// Reserved word, we reached the end of the chain
+		if parent == finish {
+			break
+		}
+		seen[parent] = true
+		nextTransform = unsorted[parent]
+		orderedTransforms = append(orderedTransforms, nextTransform)
+	}
+
+	// After the above loop, the transforms are in reverse order, so we reverse the list.
+	for i, j := 0, len(orderedTransforms)-1; i < j; i, j = i+1, j-1 {
+		orderedTransforms[i], orderedTransforms[j] = orderedTransforms[j], orderedTransforms[i]
+	}
+
+	return orderedTransforms, nil
+}
+
+// ModelFromPath returns a Model from a given path.
+func ModelFromPath(modelPath, name string) (Model, error) {
+	var (
+		model Model
+		err   error
+	)
+	switch {
+	case strings.HasSuffix(modelPath, ".urdf"):
+		model, err = ParseURDFFile(modelPath, name)
+	case strings.HasSuffix(modelPath, ".json"):
+		model, err = ParseModelJSONFile(modelPath, name)
+	default:
+		return model, errUnsupportedFileType
+	}
+	return model, err
 }

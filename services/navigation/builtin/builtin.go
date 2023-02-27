@@ -16,6 +16,7 @@ import (
 	"go.viam.com/utils"
 
 	"go.viam.com/rdk/components/base"
+	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/components/movementsensor"
 	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/registry"
@@ -30,24 +31,25 @@ const (
 )
 
 func init() {
-	registry.RegisterService(navigation.Subtype, resource.DefaultModelName, registry.Service{
+	registry.RegisterService(navigation.Subtype, resource.DefaultServiceModel, registry.Service{
 		Constructor: func(ctx context.Context, deps registry.Dependencies, c config.Service, logger golog.Logger) (interface{}, error) {
 			return NewBuiltIn(ctx, deps, c, logger)
 		},
 	},
 	)
-	cType := config.ServiceType(navigation.SubtypeName)
-	config.RegisterServiceAttributeMapConverter(cType, func(attributes config.AttributeMap) (interface{}, error) {
-		var conf Config
-		decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{TagName: "json", Result: &conf})
-		if err != nil {
-			return nil, err
-		}
-		if err := decoder.Decode(attributes); err != nil {
-			return nil, err
-		}
-		return &conf, nil
-	}, &Config{})
+	config.RegisterServiceAttributeMapConverter(navigation.Subtype, resource.DefaultServiceModel,
+		func(attributes config.AttributeMap) (interface{}, error) {
+			var conf Config
+			decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{TagName: "json", Result: &conf})
+			if err != nil {
+				return nil, err
+			}
+			if err := decoder.Decode(attributes); err != nil {
+				return nil, err
+			}
+			return &conf, nil
+		}, &Config{},
+	)
 }
 
 // Config describes how to configure the service.
@@ -130,6 +132,7 @@ func NewBuiltIn(ctx context.Context, deps registry.Dependencies, config config.S
 }
 
 type builtIn struct {
+	generic.Unimplemented
 	mu    sync.RWMutex
 	store navigation.NavStore
 	mode  navigation.Mode

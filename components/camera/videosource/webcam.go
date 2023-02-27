@@ -5,6 +5,7 @@ import (
 	"image"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/edaniels/golog"
@@ -21,12 +22,14 @@ import (
 	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/discovery"
+	"go.viam.com/rdk/pointcloud"
 	"go.viam.com/rdk/registry"
+	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/rimage/transform"
 	"go.viam.com/rdk/utils"
 )
 
-const model = "webcam"
+var model = resource.NewDefaultModel("webcam")
 
 func init() {
 	registry.RegisterComponent(
@@ -42,10 +45,10 @@ func init() {
 			if !ok {
 				return nil, utils.NewUnexpectedTypeError(attrs, config.ConvertedAttributes)
 			}
-			return NewWebcamSource(ctx, attrs, logger)
+			return NewWebcamSource(ctx, config.Name, attrs, logger)
 		}})
 
-	config.RegisterComponentAttributeMapConverter(camera.SubtypeName, model,
+	config.RegisterComponentAttributeMapConverter(camera.Subtype, model,
 		func(attributes config.AttributeMap) (interface{}, error) {
 			var conf WebcamAttrs
 			attrs, err := config.TransformAttributeMapToStruct(&conf, attributes)
@@ -60,7 +63,7 @@ func init() {
 		}, &WebcamAttrs{})
 
 	registry.RegisterDiscoveryFunction(
-		discovery.NewQuery(camera.SubtypeName, model),
+		discovery.NewQuery(camera.Subtype, model),
 		func(ctx context.Context) (interface{}, error) { return Discover(ctx, getVideoDrivers) },
 	)
 }
@@ -146,29 +149,19 @@ type WebcamAttrs struct {
 }
 
 func makeConstraints(attrs *WebcamAttrs, debug bool, logger golog.Logger) mediadevices.MediaStreamConstraints {
-	minWidth := 0
-	maxWidth := 4096
-	idealWidth := 800
-	minHeight := 0
-	maxHeight := 2160
-	idealHeight := 600
-
-	if attrs.Width > 0 {
-		minWidth = 0
-		maxWidth = attrs.Width
-		idealWidth = attrs.Width
-	}
-
-	if attrs.Height > 0 {
-		minHeight = 0
-		maxHeight = attrs.Height
-		idealHeight = attrs.Height
-	}
-
 	return mediadevices.MediaStreamConstraints{
 		Video: func(constraint *mediadevices.MediaTrackConstraints) {
-			constraint.Width = prop.IntRanged{minWidth, maxWidth, idealWidth}
-			constraint.Height = prop.IntRanged{minHeight, maxHeight, idealHeight}
+			if attrs.Width > 0 {
+				constraint.Width = prop.IntExact(attrs.Width)
+			} else {
+				constraint.Width = prop.IntRanged{Min: 0, Ideal: 640, Max: 4096}
+			}
+
+			if attrs.Height > 0 {
+				constraint.Height = prop.IntExact(attrs.Height)
+			} else {
+				constraint.Height = prop.IntRanged{Min: 0, Ideal: 480, Max: 2160}
+			}
 			constraint.FrameRate = prop.FloatRanged{0, 200, 60}
 
 			if attrs.Format == "" {
@@ -193,55 +186,74 @@ func makeConstraints(attrs *WebcamAttrs, debug bool, logger golog.Logger) mediad
 	}
 }
 
-// NewWebcamSource returns a new source based on a webcam discovered from the given attributes.
-func NewWebcamSource(ctx context.Context, attrs *WebcamAttrs, logger golog.Logger) (camera.Camera, error) {
-	var err error
-
+// findAndMakeCamera finds a video device and returns a camera with that video device as the source.
+func findAndMakeCamera(
+	ctx context.Context,
+	attrs *WebcamAttrs,
+	label string,
+	logger golog.Logger,
+) (camera.Camera, error) {
 	debug := attrs.Debug
-
 	constraints := makeConstraints(attrs, debug, logger)
-
-	if attrs.Path != "" {
-		cam, err := tryWebcamOpen(ctx, attrs, attrs.Path, false, constraints, logger)
+	if label != "" {
+		cam, err := tryWebcamOpen(ctx, attrs, label, false, constraints, logger)
 		if err != nil {
-			return cam, err
+			return nil, errors.Wrap(err, "cannot open webcam")
 		}
-
-		goutils.PanicCapturingGo(func() {
-			src, err := camera.SourceFromCamera(cam)
-			if err != nil {
-				logger.Debugw("cannot get source from camera", "error", err)
-				return
-			}
-			defer func() {
-				if err := cam.Close(ctx); err != nil {
-					logger.Debugw("failed to close camera", "error", err)
-				}
-			}()
-			for {
-				if goutils.SelectContextOrWait(ctx, 500*time.Millisecond) {
-					// mediadevices connects to the OS to get the properties for a driver. If the OS no longer knows
-					// about a specific driver then properties will be empty, and we can safely assume the driver no
-					// longer exists and should be closed.
-					if len(gostream.PropertiesFromMediaSource[image.Image, prop.Video](src)) == 0 {
-						logger.Debug("closing camera")
-						return
-					}
-				} else {
-					return
-				}
-			}
-		})
-
-		return cam, err
+		return cam, nil
 	}
 
 	source, err := gostream.GetAnyVideoSource(constraints, logger)
 	if err != nil {
-		return nil, errors.Wrapf(err, "found no webcams")
+		return nil, errors.Wrap(err, "found no webcams")
+	}
+	cam, err := makeCameraFromSource(ctx, source, attrs)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot make webcam from source")
+	}
+	return cam, nil
+}
+
+// getLabelFromCameraOrPath returns the path from the camera or an empty string if a path is not found.
+func getLabelFromCamera(cam camera.Camera, logger golog.Logger) string {
+	src, err := camera.SourceFromCamera(cam)
+	if err != nil {
+		logger.Errorw("cannot get source from camera", "error", err)
+		return ""
 	}
 
-	return makeCameraFromSource(ctx, source, attrs)
+	labels, err := gostream.LabelsFromMediaSource[image.Image, prop.Video](src)
+	if err != nil || len(labels) == 0 {
+		logger.Errorw("could not get labels from media source", "error", err)
+		return ""
+	}
+
+	return labels[0]
+}
+
+// NewWebcamSource returns a new source based on a webcam discovered from the given attributes.
+func NewWebcamSource(ctx context.Context, name string, attrs *WebcamAttrs, logger golog.Logger) (camera.Camera, error) {
+	cam, err := findAndMakeCamera(ctx, attrs, attrs.Path, logger)
+	if err != nil {
+		return nil, errors.Wrap(err, "cannot find video source for camera")
+	}
+
+	logger = logger.With("camera_name", name)
+	label := attrs.Path
+	if label == "" {
+		label = getLabelFromCamera(cam, logger)
+		logger = logger.With("camera_label", label)
+	}
+
+	cancelCtx, cancel := context.WithCancel(context.Background())
+	return &monitoredWebcam{
+		cam:       cam,
+		label:     label,
+		attrs:     attrs,
+		cancelCtx: cancelCtx,
+		cancel:    cancel,
+		logger:    logger,
+	}, nil
 }
 
 // tryWebcamOpen uses getNamedVideoSource to try and find a video device (gostream.MediaSource).
@@ -257,6 +269,21 @@ func tryWebcamOpen(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
+
+	if attrs.Width != 0 && attrs.Height != 0 {
+		img, release, err := gostream.ReadMedia(ctx, source)
+		if release != nil {
+			defer release()
+		}
+		if err != nil {
+			return nil, err
+		}
+		if img.Bounds().Dx() != attrs.Width || img.Bounds().Dy() != attrs.Height {
+			return nil, errors.Errorf("requested width and height (%dx%d) are not available for this webcam"+
+				" (closest driver found by gostream supports resolution %dx%d)",
+				attrs.Width, attrs.Height, img.Bounds().Dx(), img.Bounds().Dy())
+		}
+	}
 	return makeCameraFromSource(ctx, source, attrs)
 }
 
@@ -269,11 +296,11 @@ func makeCameraFromSource(ctx context.Context,
 	if source == nil {
 		return nil, errors.New("media source not found")
 	}
-
+	cameraModel := camera.NewPinholeModelWithBrownConradyDistortion(attrs.CameraParameters, attrs.DistortionParameters)
 	return camera.NewFromSource(
 		ctx,
 		source,
-		&transform.PinholeCameraModel{attrs.CameraParameters, attrs.DistortionParameters},
+		&cameraModel,
 		camera.ColorStream,
 	)
 }
@@ -294,4 +321,175 @@ func getNamedVideoSource(
 		}
 	}
 	return gostream.GetNamedVideoSource(filepath.Base(path), constraints, logger)
+}
+
+var _ = camera.LivenessMonitor(&monitoredWebcam{})
+
+// monitoredWebcam tries to ensure its underlying camera stays connected.
+type monitoredWebcam struct {
+	mu    sync.RWMutex
+	cam   camera.Camera
+	label string
+	attrs *WebcamAttrs
+
+	cancelCtx               context.Context
+	cancel                  func()
+	closed                  bool
+	disconnected            bool
+	activeBackgroundWorkers sync.WaitGroup
+	logger                  golog.Logger
+}
+
+func (c *monitoredWebcam) isCameraConnected() (bool, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	src, err := camera.SourceFromCamera(c.cam)
+	if err != nil {
+		return true, errors.Wrap(err, "cannot get source from camera")
+	}
+	props, err := gostream.PropertiesFromMediaSource[image.Image, prop.Video](src)
+	if err != nil {
+		return true, errors.Wrap(err, "cannot get properties from media source")
+	}
+	// github.com/pion/mediadevices connects to the OS to get the props for a driver. On disconnect props will be empty.
+	// TODO(RSDK-1959): this only works for linux
+	return len(props) != 0, nil
+}
+
+func (c *monitoredWebcam) reconnectCamera(notifyReset func()) error {
+	c.logger.Debug("closing disconnected camera")
+	if err := c.cam.Close(c.cancelCtx); err != nil {
+		c.logger.Errorw("failed to close disconnected camera", "error", err)
+	}
+
+	newCam, err := findAndMakeCamera(c.cancelCtx, c.attrs, c.label, c.logger)
+	if err != nil {
+		return errors.Wrap(err, "failed to find camera")
+	}
+
+	c.mu.Lock()
+	c.cam = newCam
+	c.disconnected = false
+	c.closed = false
+	c.mu.Unlock()
+
+	notifyReset()
+	return nil
+}
+
+func (c *monitoredWebcam) Monitor(notifyReset func()) {
+	const wait = 500 * time.Millisecond
+	c.activeBackgroundWorkers.Add(1)
+
+	goutils.ManagedGo(func() {
+		for {
+			if !goutils.SelectContextOrWait(c.cancelCtx, wait) {
+				return
+			}
+
+			ok, err := c.isCameraConnected()
+			if err != nil {
+				c.logger.Debugw("cannot determine camera status", "error", err)
+				continue
+			}
+
+			if !ok {
+				c.mu.Lock()
+				c.disconnected = true
+				c.mu.Unlock()
+
+				c.logger.Error("camera no longer connected; reconnecting")
+				for {
+					if !goutils.SelectContextOrWait(c.cancelCtx, wait) {
+						return
+					}
+					if err := c.reconnectCamera(notifyReset); err != nil {
+						c.logger.Errorw("failed to reconnect camera", "error", err)
+						continue
+					}
+					c.logger.Infow("camera reconnected")
+					break
+				}
+			}
+		}
+	}, c.activeBackgroundWorkers.Done)
+}
+
+func (c *monitoredWebcam) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if err := c.ensureActive(); err != nil {
+		return nil, err
+	}
+	return c.cam.DoCommand(ctx, cmd)
+}
+
+func (c *monitoredWebcam) Projector(ctx context.Context) (transform.Projector, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if err := c.ensureActive(); err != nil {
+		return nil, err
+	}
+	return c.cam.Projector(ctx)
+}
+
+func (c *monitoredWebcam) Stream(ctx context.Context, errHandlers ...gostream.ErrorHandler) (gostream.VideoStream, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if err := c.ensureActive(); err != nil {
+		return nil, err
+	}
+	return c.cam.Stream(ctx, errHandlers...)
+}
+
+func (c *monitoredWebcam) NextPointCloud(ctx context.Context) (pointcloud.PointCloud, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if err := c.ensureActive(); err != nil {
+		return nil, err
+	}
+	return c.cam.NextPointCloud(ctx)
+}
+
+func (c *monitoredWebcam) Properties(ctx context.Context) (camera.Properties, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if err := c.ensureActive(); err != nil {
+		return camera.Properties{}, err
+	}
+	return c.cam.Properties(ctx)
+}
+
+var (
+	errClosed       = errors.New("camera has been closed")
+	errDisconnected = errors.New("camera is disconnected; please try again in a few moments")
+)
+
+func (c *monitoredWebcam) ensureActive() error {
+	if c.closed {
+		return errClosed
+	}
+	if c.disconnected {
+		return errDisconnected
+	}
+	return nil
+}
+
+func (c *monitoredWebcam) Close(ctx context.Context) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return errors.New("webcam already closed")
+	}
+	c.closed = true
+	c.mu.Unlock()
+	c.cancel()
+	c.activeBackgroundWorkers.Wait()
+	return c.cam.Close(ctx)
+}
+
+func (c *monitoredWebcam) ProxyFor() interface{} {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cam
 }

@@ -38,13 +38,26 @@ export const fixArmStatus = (old: {
     );
   }
 
-  for (let j = 0; j < old.joint_positions.values.length; j += 1) {
+  /*
+   * this conditional is in place so the RC card renders when
+   * the fake arm is not using any kinematics file
+   */
+  if (old.joint_positions.values === undefined) {
     newStatus.joint_pieces.push(
       {
-        joint: j,
-        jointValue: old.joint_positions.values[j] || 0,
+        joint: 0,
+        jointValue: 100,
       }
     );
+  } else {
+    for (let j = 0; j < old.joint_positions.values.length; j += 1) {
+      newStatus.joint_pieces.push(
+        {
+          joint: j,
+          jointValue: old.joint_positions.values[j] || 0,
+        }
+      );
+    }
   }
 
   return newStatus;
@@ -111,13 +124,11 @@ export const fixInputStatus = (old: {
 
 export const fixMotorStatus = (old: {
   is_powered: boolean
-  position_reporting: boolean
   position: number
   is_moving: boolean
 }) => {
   return {
     isPowered: old.is_powered || false,
-    positionReporting: old.position_reporting || false,
     position: old.position || 0,
     isMoving: old.is_moving || false,
   };

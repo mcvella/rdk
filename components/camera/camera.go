@@ -48,11 +48,11 @@ func init() {
 	})
 
 	data.RegisterCollector(data.MethodMetadata{
-		Subtype:    SubtypeName,
+		Subtype:    Subtype,
 		MethodName: nextPointCloud.String(),
 	}, newNextPointCloudCollector)
 	data.RegisterCollector(data.MethodMetadata{
-		Subtype:    SubtypeName,
+		Subtype:    Subtype,
 		MethodName: readImage.String(),
 	}, newReadImageCollector)
 }
@@ -67,7 +67,7 @@ var Subtype = resource.NewSubtype(
 	SubtypeName,
 )
 
-// Named is a helper for getting the named cameras's typed resource name.
+// Named is a helper for getting the named camera's typed resource name.
 func Named(name string) resource.Name {
 	return resource.NameFromSubtype(Subtype, name)
 }
@@ -77,6 +77,7 @@ type Properties struct {
 	// SupportsPCD indicates that the Camera supports a valid
 	// implementation of NextPointCloud
 	SupportsPCD      bool
+	ImageType        ImageType
 	IntrinsicParams  *transform.PinholeCameraIntrinsics
 	DistortionParams transform.Distorter
 }
@@ -120,7 +121,7 @@ type PointCloudSource interface {
 func NewFromReader(
 	ctx context.Context,
 	reader gostream.VideoReader,
-	syst *transform.PinholeCameraModel, streamType StreamType,
+	syst *transform.PinholeCameraModel, imageType ImageType,
 ) (Camera, error) {
 	if reader == nil {
 		return nil, errors.New("cannot have a nil reader")
@@ -134,7 +135,14 @@ func NewFromReader(
 			if err != nil {
 				return nil, NewPropertiesError("source camera")
 			}
-			actualSystem = &transform.PinholeCameraModel{props.IntrinsicParams, props.DistortionParams}
+
+			var cameraModel transform.PinholeCameraModel
+			cameraModel.PinholeCameraIntrinsics = props.IntrinsicParams
+
+			if props.DistortionParams != nil {
+				cameraModel.Distortion = props.DistortionParams
+			}
+			actualSystem = &cameraModel
 		}
 	}
 	return &videoSource{
@@ -142,8 +150,24 @@ func NewFromReader(
 		videoSource:  vs,
 		videoStream:  gostream.NewEmbeddedVideoStream(vs),
 		actualSource: reader,
-		streamType:   streamType,
+		imageType:    imageType,
 	}, nil
+}
+
+// NewPinholeModelWithBrownConradyDistortion creates a transform.PinholeCameraModel from
+// a *transform.PinholeCameraIntrinsics and a *transform.BrownConrady.
+// If *transform.BrownConrady is `nil`, transform.PinholeCameraModel.Distortion
+// is not set & remains nil, to prevent https://go.dev/doc/faq#nil_error.
+func NewPinholeModelWithBrownConradyDistortion(pinholeCameraIntrinsics *transform.PinholeCameraIntrinsics,
+	distortion *transform.BrownConrady,
+) transform.PinholeCameraModel {
+	var cameraModel transform.PinholeCameraModel
+	cameraModel.PinholeCameraIntrinsics = pinholeCameraIntrinsics
+
+	if distortion != nil {
+		cameraModel.Distortion = distortion
+	}
+	return cameraModel
 }
 
 // NewPropertiesError returns an error specific to a failure in Properties.
@@ -158,7 +182,7 @@ func NewPropertiesError(cameraIdentifier string) error {
 func NewFromSource(
 	ctx context.Context,
 	source gostream.VideoSource,
-	syst *transform.PinholeCameraModel, streamType StreamType,
+	syst *transform.PinholeCameraModel, imageType ImageType,
 ) (Camera, error) {
 	if source == nil {
 		return nil, errors.New("cannot have a nil source")
@@ -171,7 +195,14 @@ func NewFromSource(
 			if err != nil {
 				return nil, NewPropertiesError("source camera")
 			}
-			actualSystem = &transform.PinholeCameraModel{props.IntrinsicParams, props.DistortionParams}
+			var cameraModel transform.PinholeCameraModel
+			cameraModel.PinholeCameraIntrinsics = props.IntrinsicParams
+
+			if props.DistortionParams != nil {
+				cameraModel.Distortion = props.DistortionParams
+			}
+
+			actualSystem = &cameraModel
 		}
 	}
 	return &videoSource{
@@ -179,7 +210,7 @@ func NewFromSource(
 		videoSource:  source,
 		videoStream:  gostream.NewEmbeddedVideoStream(source),
 		actualSource: source,
-		streamType:   streamType,
+		imageType:    imageType,
 	}, nil
 }
 
@@ -189,7 +220,7 @@ type videoSource struct {
 	videoStream  gostream.VideoStream
 	actualSource interface{}
 	system       *transform.PinholeCameraModel
-	streamType   StreamType
+	imageType    ImageType
 }
 
 // SourceFromCamera returns a gostream.VideoSource from a camera.Camera if possible, else nil.
@@ -248,11 +279,16 @@ func (vs *videoSource) Properties(ctx context.Context) (Properties, error) {
 	if vs.system == nil {
 		return result, nil
 	}
-	if (vs.system.PinholeCameraIntrinsics != nil) && (vs.streamType == DepthStream) {
+	if (vs.system.PinholeCameraIntrinsics != nil) && (vs.imageType == DepthStream) {
 		result.SupportsPCD = true
 	}
+	result.ImageType = vs.imageType
 	result.IntrinsicParams = vs.system.PinholeCameraIntrinsics
-	result.DistortionParams = vs.system.Distortion
+
+	if vs.system.Distortion != nil {
+		result.DistortionParams = vs.system.Distortion
+	}
+
 	return result, nil
 }
 
@@ -262,12 +298,12 @@ func (vs *videoSource) Close(ctx context.Context) error {
 
 // NewUnimplementedInterfaceError is used when there is a failed interface check.
 func NewUnimplementedInterfaceError(actual interface{}) error {
-	return utils.NewUnimplementedInterfaceError((Camera)(nil), actual)
+	return utils.NewUnimplementedInterfaceError((*Camera)(nil), actual)
 }
 
 // DependencyTypeError is used when a resource doesn't implement the expected interface.
-func DependencyTypeError(name, actual interface{}) error {
-	return utils.DependencyTypeError(name, (Camera)(nil), actual)
+func DependencyTypeError(name string, actual interface{}) error {
+	return utils.DependencyTypeError(name, (*Camera)(nil), actual)
 }
 
 // WrapWithReconfigurable wraps a camera with a reconfigurable and locking interface.
@@ -279,13 +315,38 @@ func WrapWithReconfigurable(r interface{}, name resource.Name) (resource.Reconfi
 	if reconfigurable, ok := c.(*reconfigurableCamera); ok {
 		return reconfigurable, nil
 	}
+	reconfigurable := newReconfigurable(c, name)
+
+	if mon, ok := c.(LivenessMonitor); ok {
+		mon.Monitor(func() {
+			reconfigurable.mu.Lock()
+			defer reconfigurable.mu.Unlock()
+			reconfigurable.reconfigureKnownCamera(newReconfigurable(c, name))
+		})
+	}
+
+	return reconfigurable, nil
+}
+
+func newReconfigurable(c Camera, name resource.Name) *reconfigurableCamera {
 	cancelCtx, cancel := context.WithCancel(context.Background())
 	return &reconfigurableCamera{
 		name:      name,
 		actual:    c,
 		cancelCtx: cancelCtx,
 		cancel:    cancel,
-	}, nil
+	}
+}
+
+// A LivenessMonitor is responsible for monitoring the liveness of a camera. An example
+// is connectivity. Since the model itself knows best about how to maintain this state,
+// the reconfigurable offers a safe way to notify if a state needs to be reset due
+// to some exceptional event (like a reconnect).
+// It is expected that the monitoring code is tied to the lifetime of the resource
+// and once the resource is closed, so should the monitor. That is, it should
+// no longer send any resets once a Close on its associated resource has returned.
+type LivenessMonitor interface {
+	Monitor(notifyReset func())
 }
 
 var (
@@ -310,15 +371,7 @@ func FromDependencies(deps registry.Dependencies, name string) (Camera, error) {
 
 // FromRobot is a helper for getting the named Camera from the given Robot.
 func FromRobot(r robot.Robot, name string) (Camera, error) {
-	res, err := r.ResourceByName(Named(name))
-	if err != nil {
-		return nil, err
-	}
-	part, ok := res.(Camera)
-	if !ok {
-		return nil, NewUnimplementedInterfaceError(res)
-	}
-	return part, nil
+	return robot.ResourceFromRobot[Camera](r, Named(name))
 }
 
 // NamesFromRobot is a helper for getting all camera names from the given Robot.
@@ -446,12 +499,17 @@ func (c *reconfigurableCamera) Reconfigure(ctx context.Context, newCamera resour
 	if err := viamutils.TryClose(ctx, c.actual); err != nil {
 		golog.Global().Errorw("error closing old", "error", err)
 	}
+	c.reconfigureKnownCamera(actual)
+	return nil
+}
+
+// assumes lock is held.
+func (c *reconfigurableCamera) reconfigureKnownCamera(newCamera *reconfigurableCamera) {
 	c.cancel()
 	// reset
-	c.actual = actual.actual
-	c.cancelCtx = actual.cancelCtx
-	c.cancel = actual.cancel
-	return nil
+	c.actual = newCamera.actual
+	c.cancelCtx = newCamera.cancelCtx
+	c.cancel = newCamera.cancel
 }
 
 // UpdateAction helps hint the reconfiguration process on what strategy to use given a modified config.

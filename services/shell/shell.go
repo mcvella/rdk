@@ -37,6 +37,7 @@ func init() {
 // A Service handles shells for a local robot.
 type Service interface {
 	Shell(ctx context.Context, extra map[string]interface{}) (input chan<- string, output <-chan Output, retErr error)
+	resource.Generic
 }
 
 var (
@@ -47,7 +48,7 @@ var (
 
 // NewUnimplementedInterfaceError is used when there is a failed interface check.
 func NewUnimplementedInterfaceError(actual interface{}) error {
-	return rdkutils.NewUnimplementedInterfaceError((Service)(nil), actual)
+	return rdkutils.NewUnimplementedInterfaceError((*Service)(nil), actual)
 }
 
 // Output reflects an instance of shell output on either stdout or stderr.
@@ -89,6 +90,14 @@ func (svc *reconfigurableShell) Shell(
 	svc.mu.RLock()
 	defer svc.mu.RUnlock()
 	return svc.actual.Shell(ctx, extra)
+}
+
+func (svc *reconfigurableShell) DoCommand(ctx context.Context,
+	cmd map[string]interface{},
+) (map[string]interface{}, error) {
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+	return svc.actual.DoCommand(ctx, cmd)
 }
 
 func (svc *reconfigurableShell) Close(ctx context.Context) error {

@@ -14,8 +14,14 @@ import (
 	"go.viam.com/rdk/components/base"
 	"go.viam.com/rdk/components/board"
 	fakeboard "go.viam.com/rdk/components/board/fake"
+	"go.viam.com/rdk/components/camera"
 	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/resource"
+)
+
+var (
+	fakeModel = resource.NewDefaultModel("fake")
+	extModel  = resource.NewModel("acme", "test", "model")
 )
 
 func TestDiffConfigs(t *testing.T) {
@@ -35,7 +41,8 @@ func TestDiffConfigs(t *testing.T) {
 				Namespace: resource.ResourceNamespaceRDK,
 				Name:      "arm1",
 				Type:      arm.SubtypeName,
-				Model:     "fake",
+				API:       arm.Subtype,
+				Model:     fakeModel,
 				Attributes: config.AttributeMap{
 					"one": float64(1),
 				},
@@ -44,7 +51,8 @@ func TestDiffConfigs(t *testing.T) {
 				Namespace: resource.ResourceNamespaceRDK,
 				Name:      "base1",
 				Type:      base.SubtypeName,
-				Model:     "fake",
+				API:       base.Subtype,
+				Model:     fakeModel,
 				Attributes: config.AttributeMap{
 					"two": float64(2),
 				},
@@ -52,8 +60,9 @@ func TestDiffConfigs(t *testing.T) {
 			{
 				Namespace: resource.ResourceNamespaceRDK,
 				Name:      "board1",
-				Model:     "fake",
+				Model:     fakeModel,
 				Type:      board.SubtypeName,
+				API:       board.Subtype,
 				ConvertedAttributes: &fakeboard.Config{
 					Analogs: []board.AnalogConfig{
 						{
@@ -101,7 +110,8 @@ func TestDiffConfigs(t *testing.T) {
 				Namespace: resource.ResourceNamespaceRDK,
 				Name:      "arm1",
 				Type:      arm.SubtypeName,
-				Model:     "fake",
+				API:       arm.Subtype,
+				Model:     fakeModel,
 				Attributes: config.AttributeMap{
 					"two": float64(2),
 				},
@@ -110,7 +120,8 @@ func TestDiffConfigs(t *testing.T) {
 				Namespace: resource.ResourceNamespaceRDK,
 				Name:      "base1",
 				Type:      base.SubtypeName,
-				Model:     "fake",
+				API:       base.Subtype,
+				Model:     extModel,
 				Attributes: config.AttributeMap{
 					"three": float64(3),
 				},
@@ -118,8 +129,9 @@ func TestDiffConfigs(t *testing.T) {
 			{
 				Namespace: resource.ResourceNamespaceRDK,
 				Name:      "board1",
-				Model:     "fake",
+				Model:     fakeModel,
 				Type:      board.SubtypeName,
+				API:       board.Subtype,
 				ConvertedAttributes: &fakeboard.Config{
 					Analogs: []board.AnalogConfig{
 						{
@@ -167,6 +179,7 @@ func TestDiffConfigs(t *testing.T) {
 				Removed:        &config.Config{},
 				ResourcesEqual: true,
 				NetworkEqual:   true,
+				MediaEqual:     true,
 			},
 		},
 		{
@@ -179,6 +192,7 @@ func TestDiffConfigs(t *testing.T) {
 				Removed:        &config.Config{},
 				ResourcesEqual: true,
 				NetworkEqual:   true,
+				MediaEqual:     true,
 			},
 		},
 		{
@@ -191,6 +205,7 @@ func TestDiffConfigs(t *testing.T) {
 				Removed:        &config.Config{},
 				ResourcesEqual: false,
 				NetworkEqual:   true,
+				MediaEqual:     true,
 			},
 		},
 		{
@@ -203,6 +218,7 @@ func TestDiffConfigs(t *testing.T) {
 				Modified:       &config.ModifiedConfigDiff{},
 				ResourcesEqual: false,
 				NetworkEqual:   true,
+				MediaEqual:     true,
 			},
 		},
 		{
@@ -215,6 +231,7 @@ func TestDiffConfigs(t *testing.T) {
 				Modified:       &config2,
 				ResourcesEqual: false,
 				NetworkEqual:   true,
+				MediaEqual:     true,
 			},
 		},
 		{
@@ -228,13 +245,15 @@ func TestDiffConfigs(t *testing.T) {
 							Namespace: resource.ResourceNamespaceRDK,
 							Name:      "base2",
 							Type:      base.SubtypeName,
-							Model:     "fake",
+							API:       base.Subtype,
+							Model:     fakeModel,
 						},
 						{
 							Namespace: resource.ResourceNamespaceRDK,
 							Name:      "board2",
 							Type:      board.SubtypeName,
-							Model:     "fake",
+							API:       board.Subtype,
+							Model:     fakeModel,
 							ConvertedAttributes: &fakeboard.Config{
 								DigitalInterrupts: []board.DigitalInterruptConfig{{Name: "encoder2", Pin: "16"}},
 							},
@@ -265,7 +284,8 @@ func TestDiffConfigs(t *testing.T) {
 							Namespace: resource.ResourceNamespaceRDK,
 							Name:      "arm1",
 							Type:      arm.SubtypeName,
-							Model:     "fake",
+							API:       arm.Subtype,
+							Model:     extModel,
 							Attributes: config.AttributeMap{
 								"two": float64(2),
 							},
@@ -274,7 +294,8 @@ func TestDiffConfigs(t *testing.T) {
 							Namespace: resource.ResourceNamespaceRDK,
 							Name:      "board1",
 							Type:      board.SubtypeName,
-							Model:     "fake",
+							API:       board.Subtype,
+							Model:     fakeModel,
 							ConvertedAttributes: &fakeboard.Config{
 								Analogs: []board.AnalogConfig{{Name: "analog1", Pin: "1"}},
 							},
@@ -295,7 +316,8 @@ func TestDiffConfigs(t *testing.T) {
 							Namespace: resource.ResourceNamespaceRDK,
 							Name:      "base1",
 							Type:      base.SubtypeName,
-							Model:     "fake",
+							API:       base.Subtype,
+							Model:     fakeModel,
 							Attributes: config.AttributeMap{
 								"two": float64(2),
 							},
@@ -312,6 +334,7 @@ func TestDiffConfigs(t *testing.T) {
 				},
 				ResourcesEqual: false,
 				NetworkEqual:   true,
+				MediaEqual:     true,
 			},
 		},
 	} {
@@ -611,5 +634,45 @@ func TestDiffSanitize(t *testing.T) {
 		test.That(t, diffStr, test.ShouldNotContainSubstring, rem.Secret)
 		test.That(t, diffStr, test.ShouldNotContainSubstring, rem.Auth.Credentials.Payload)
 		test.That(t, diffStr, test.ShouldNotContainSubstring, rem.Auth.SignalingCreds.Payload)
+	}
+}
+
+func TestDiffMedia(t *testing.T) {
+	config1 := config.Config{}
+	config2 := config.Config{
+		Components: []config.Component{
+			{
+				Namespace: resource.ResourceNamespaceRDK,
+				Name:      "cam1",
+				Type:      camera.SubtypeName,
+				API:       camera.Subtype,
+				Model:     fakeModel,
+			},
+		},
+	}
+	for _, tc := range []struct {
+		Name       string
+		Leftcfg    config.Config
+		RightCfg   config.Config
+		MediaEqual bool
+	}{
+		{
+			"different media config",
+			config1,
+			config2,
+			false,
+		},
+		{
+			"same media config",
+			config2,
+			config2,
+			true,
+		},
+	} {
+		t.Run(tc.Name, func(t *testing.T) {
+			diff, err := config.DiffConfigs(tc.Leftcfg, tc.RightCfg, true)
+			test.That(t, err, test.ShouldBeNil)
+			test.That(t, diff.MediaEqual, test.ShouldEqual, tc.MediaEqual)
+		})
 	}
 }

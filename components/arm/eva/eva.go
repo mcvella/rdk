@@ -1,4 +1,6 @@
 // Package eva implements the Eva robot from Automata.
+// api found at
+// https://github.com/automata-tech/eva_python_sdk/blob/development/evasdk/eva_http_client.py
 package eva
 
 import (
@@ -17,7 +19,6 @@ import (
 	"github.com/edaniels/golog"
 	"github.com/pkg/errors"
 	"go.uber.org/multierr"
-	commonpb "go.viam.com/api/common/v1"
 	pb "go.viam.com/api/component/arm/v1"
 	"go.viam.com/utils"
 
@@ -28,12 +29,13 @@ import (
 	"go.viam.com/rdk/operation"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/registry"
+	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/robot"
 	"go.viam.com/rdk/spatialmath"
 )
 
-// ModelName is the string used to refer to the eva arm model.
-const ModelName = "eva"
+// ModelName is the resource model.
+var ModelName = resource.NewDefaultModel("eva")
 
 // AttrConfig is used for converting config attributes.
 type AttrConfig struct {
@@ -51,7 +53,7 @@ func init() {
 		},
 	})
 
-	config.RegisterComponentAttributeMapConverter(arm.SubtypeName, ModelName,
+	config.RegisterComponentAttributeMapConverter(arm.Subtype, ModelName,
 		func(attributes config.AttributeMap) (interface{}, error) {
 			var conf AttrConfig
 			return config.TransformAttributeMapToStruct(&conf, attributes)
@@ -75,9 +77,11 @@ type evaData struct {
 	// [0.0008628905634395778 0 0.0002876301878131926 0 -0.00038350690738298 0.0005752603756263852]
 	ServosPosition []float64 `json:"servos.telemetry.position"`
 
+	//nolint:dupword
 	// [53.369998931884766 43.75 43.869998931884766 43.869998931884766 51 48.619998931884766]
 	ServosTemperature []float64 `json:"servos.telemetry.temperature"`
 
+	//nolint:dupword
 	// [0 0 0 0 0 0]
 	ServosVelocity []float64 `json:"servos.telemetry.velocity"`
 
@@ -102,6 +106,34 @@ type eva struct {
 	opMgr operation.SingleOperationManager
 }
 
+// NewEva TODO.
+func NewEva(ctx context.Context, r robot.Robot, cfg config.Component, logger golog.Logger) (arm.LocalArm, error) {
+	model, err := Model(cfg.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	e := &eva{
+		host:      cfg.ConvertedAttributes.(*AttrConfig).Host,
+		version:   "v1",
+		token:     cfg.ConvertedAttributes.(*AttrConfig).Token,
+		logger:    logger,
+		moveLock:  &sync.Mutex{},
+		model:     model,
+		robot:     r,
+		frameJSON: evamodeljson,
+	}
+
+	name, err := e.apiName(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	e.logger.Debugf("connected to eva: %v", name)
+
+	return e, nil
+}
+
 func (e *eva) JointPositions(ctx context.Context, extra map[string]interface{}) (*pb.JointPositions, error) {
 	data, err := e.DataSnapshot(ctx)
 	if err != nil {
@@ -116,14 +148,14 @@ func (e *eva) EndPosition(ctx context.Context, extra map[string]interface{}) (sp
 	if err != nil {
 		return nil, err
 	}
-	return motionplan.ComputePosition(e.model, joints)
+	return motionplan.ComputeOOBPosition(e.model, joints)
 }
 
 // MoveToPosition moves the arm to the specified cartesian position.
 func (e *eva) MoveToPosition(
 	ctx context.Context,
 	pos spatialmath.Pose,
-	worldState *commonpb.WorldState,
+	worldState *referenceframe.WorldState,
 	extra map[string]interface{},
 ) error {
 	ctx, done := e.opMgr.New(ctx)
@@ -132,6 +164,10 @@ func (e *eva) MoveToPosition(
 }
 
 func (e *eva) MoveToJointPositions(ctx context.Context, newPositions *pb.JointPositions, extra map[string]interface{}) error {
+	// check that joint positions are not out of bounds
+	if err := arm.CheckDesiredJointPositions(ctx, e, newPositions.Values); err != nil {
+		return err
+	}
 	ctx, done := e.opMgr.New(ctx)
 	defer done()
 
@@ -282,8 +318,13 @@ func (e *eva) resetErrors(ctx context.Context) error {
 }
 
 func (e *eva) Stop(ctx context.Context, extra map[string]interface{}) error {
-	// RSDK-374: Implement Stop
-	return arm.ErrStopUnimplemented
+	if e.opMgr.OpRunning() {
+		return multierr.Combine(
+			e.apiRequest(ctx, "POST", "controls/pause", nil, true, nil),  // pause robot
+			e.apiRequest(ctx, "POST", "controls/cancel", nil, true, nil), // make state ready to run again
+		)
+	}
+	return nil
 }
 
 func (e *eva) IsMoving(ctx context.Context) (bool, error) {
@@ -355,38 +396,14 @@ func (e *eva) CurrentInputs(ctx context.Context) ([]referenceframe.Input, error)
 }
 
 func (e *eva) GoToInputs(ctx context.Context, goal []referenceframe.Input) error {
-	return e.MoveToJointPositions(ctx, e.model.ProtobufFromInput(goal), nil)
+	positionDegs := e.model.ProtobufFromInput(goal)
+	if err := arm.CheckDesiredJointPositions(ctx, e, positionDegs.Values); err != nil {
+		return err
+	}
+	return e.MoveToJointPositions(ctx, positionDegs, nil)
 }
 
 // Model returns the kinematics model of the eva arm, also has all Frame information.
 func Model(name string) (referenceframe.Model, error) {
 	return referenceframe.UnmarshalModelJSON(evamodeljson, name)
-}
-
-// NewEva TODO.
-func NewEva(ctx context.Context, r robot.Robot, cfg config.Component, logger golog.Logger) (arm.LocalArm, error) {
-	model, err := Model(cfg.Name)
-	if err != nil {
-		return nil, err
-	}
-
-	e := &eva{
-		host:      cfg.ConvertedAttributes.(*AttrConfig).Host,
-		version:   "v1",
-		token:     cfg.ConvertedAttributes.(*AttrConfig).Token,
-		logger:    logger,
-		moveLock:  &sync.Mutex{},
-		model:     model,
-		robot:     r,
-		frameJSON: evamodeljson,
-	}
-
-	name, err := e.apiName(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	e.logger.Debugf("connected to eva: %v", name)
-
-	return e, nil
 }

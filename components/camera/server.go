@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 
+	"github.com/edaniels/golog"
 	"github.com/edaniels/gostream"
 	"github.com/pkg/errors"
 	"go.opencensus.io/trace"
+	commonpb "go.viam.com/api/common/v1"
 	pb "go.viam.com/api/component/camera/v1"
 	"google.golang.org/genproto/googleapis/api/httpbody"
 
 	"go.viam.com/rdk/pointcloud"
+	"go.viam.com/rdk/protoutils"
 	"go.viam.com/rdk/rimage"
 	"go.viam.com/rdk/subtype"
 	"go.viam.com/rdk/utils"
@@ -19,12 +22,16 @@ import (
 // subtypeServer implements the CameraService from camera.proto.
 type subtypeServer struct {
 	pb.UnimplementedCameraServiceServer
-	s subtype.Service
+	s        subtype.Service
+	imgTypes map[string]ImageType
+	logger   golog.Logger
 }
 
 // NewServer constructs an camera gRPC service server.
 func NewServer(s subtype.Service) pb.CameraServiceServer {
-	return &subtypeServer{s: s}
+	logger := golog.NewLogger("camserver")
+	imgTypes := make(map[string]ImageType)
+	return &subtypeServer{s: s, logger: logger, imgTypes: imgTypes}
 }
 
 // getCamera returns the camera specified, nil if not.
@@ -53,10 +60,28 @@ func (s *subtypeServer) GetImage(
 		return nil, err
 	}
 
+	// Determine the mimeType we should try to use based on camera properties
 	if req.MimeType == "" {
-		req.MimeType = utils.MimeTypeRawRGBALazy
+		if _, ok := s.imgTypes[req.Name]; !ok {
+			props, err := cam.Properties(ctx)
+			if err != nil {
+				s.logger.Warnf("camera properties not found for %s, assuming color images: %v", req.Name, err)
+				s.imgTypes[req.Name] = ColorStream
+			} else {
+				s.imgTypes[req.Name] = props.ImageType
+			}
+		}
+		switch s.imgTypes[req.Name] {
+		case ColorStream, UnspecifiedStream:
+			req.MimeType = utils.MimeTypeJPEG
+		case DepthStream:
+			req.MimeType = utils.MimeTypeRawDepth
+		default:
+			req.MimeType = utils.MimeTypeJPEG
+		}
 	}
 
+	req.MimeType = utils.WithLazyMIMEType(req.MimeType)
 	img, release, err := ReadImage(gostream.WithMIMETypeHint(ctx, req.MimeType), cam)
 	if err != nil {
 		return nil, err
@@ -166,4 +191,15 @@ func (s *subtypeServer) GetProperties(
 		}
 	}
 	return result, nil
+}
+
+// DoCommand receives arbitrary commands.
+func (s *subtypeServer) DoCommand(ctx context.Context,
+	req *commonpb.DoCommandRequest,
+) (*commonpb.DoCommandResponse, error) {
+	camera, err := s.getCamera(req.GetName())
+	if err != nil {
+		return nil, err
+	}
+	return protoutils.DoFromResourceServer(ctx, camera, req)
 }

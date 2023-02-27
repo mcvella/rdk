@@ -22,7 +22,7 @@ func TestIKTolerances(t *testing.T) {
 
 	m, err := frame.ParseModelJSONFile(utils.ResolveFile("referenceframe/testjson/varm.json"), "")
 	test.That(t, err, test.ShouldBeNil)
-	mp, err := newCBiRRTMotionPlanner(m, nCPU, rand.New(rand.NewSource(1)), logger)
+	mp, err := newCBiRRTMotionPlanner(m, rand.New(rand.NewSource(1)), logger, nil)
 	test.That(t, err, test.ShouldBeNil)
 
 	// Test inability to arrive at another position due to orientation
@@ -34,14 +34,16 @@ func TestIKTolerances(t *testing.T) {
 		OY: -3.3,
 		OZ: -1.11,
 	})
-	opt := newBasicPlannerOptions()
-	_, err = mp.Plan(context.Background(), pos, frame.FloatsToInputs([]float64{0, 0}), opt)
+	_, err = mp.plan(context.Background(), pos, frame.FloatsToInputs([]float64{0, 0}))
 	test.That(t, err, test.ShouldNotBeNil)
 
 	// Now verify that setting tolerances to zero allows the same arm to reach that position
+	opt := newBasicPlannerOptions()
 	opt.SetMetric(NewPositionOnlyMetric())
 	opt.SetMaxSolutions(50)
-	_, err = mp.Plan(context.Background(), pos, frame.FloatsToInputs([]float64{0, 0}), opt)
+	mp, err = newCBiRRTMotionPlanner(m, rand.New(rand.NewSource(1)), logger, opt)
+	test.That(t, err, test.ShouldBeNil)
+	_, err = mp.plan(context.Background(), pos, frame.FloatsToInputs([]float64{0, 0}))
 	test.That(t, err, test.ShouldBeNil)
 }
 
@@ -82,8 +84,6 @@ func TestConstraintPath(t *testing.T) {
 }
 
 func TestLineFollow(t *testing.T) {
-	logger := golog.NewDebugLogger("armplay")
-
 	p1 := spatial.NewPoseFromProtobuf(&commonpb.Pose{
 		X:  440,
 		Y:  -447,
@@ -139,20 +139,19 @@ func TestLineFollow(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 	err = fs.AddFrame(markerFrame, m)
 	test.That(t, err, test.ShouldBeNil)
-	fss := NewSolvableFrameSystem(fs, logger)
 
 	solveFrame := markerFrame
 	goalFrame := fs.World()
 
-	sFrames, err := fss.TracebackFrame(solveFrame)
+	sFrames, err := fs.TracebackFrame(solveFrame)
 	test.That(t, err, test.ShouldBeNil)
 
 	// Create a frame to solve for, and an IK solver with that frame.
 	sf, err := newSolverFrame(
-		fss,
+		fs,
 		sFrames,
 		goalFrame.Name(),
-		frame.StartPositions(fss),
+		frame.StartPositions(fs),
 	)
 	test.That(t, err, test.ShouldBeNil)
 
@@ -170,65 +169,84 @@ func TestLineFollow(t *testing.T) {
 	test.That(t, ok, test.ShouldBeFalse)
 	// lastGood.StartInput should pass constraints, while lastGood.EndInput should fail`
 	lastGood.Frame = sf
-	pass, _ := opt.CheckConstraints(lastGood)
+	pass, _, _ := opt.CheckConstraints(lastGood)
 	test.That(t, pass, test.ShouldBeTrue)
 	lastGood.StartInput = lastGood.EndInput
 	lastGood.StartPos = nil
-	pass, _ = opt.CheckConstraints(lastGood)
+	pass, _, failName := opt.CheckConstraints(lastGood)
 	test.That(t, pass, test.ShouldBeFalse)
+	test.That(t, failName, test.ShouldEqual, "whiteboard")
 }
 
-func TestCollisionConstraint(t *testing.T) {
+func TestCollisionConstraints(t *testing.T) {
 	zeroPos := frame.FloatsToInputs([]float64{0, 0, 0, 0, 0, 0})
 	cases := []struct {
 		input    []frame.Input
 		expected bool
+		failName string
 	}{
-		{zeroPos, true},
-		{frame.FloatsToInputs([]float64{math.Pi / 2, 0, 0, 0, 0, 0}), true},
-		{frame.FloatsToInputs([]float64{math.Pi, 0, 0, 0, 0, 0}), false},
-		{frame.FloatsToInputs([]float64{math.Pi / 2, 0, 0, 0, 2, 0}), false},
+		{zeroPos, true, ""},
+		{frame.FloatsToInputs([]float64{math.Pi / 2, 0, 0, 0, 0, 0}), true, ""},
+		{frame.FloatsToInputs([]float64{math.Pi, 0, 0, 0, 0, 0}), false, defaultObstacleConstraintName},
+		{frame.FloatsToInputs([]float64{math.Pi / 2, 0, 0, 0, 2, 0}), false, defaultSelfCollisionConstraintName},
 	}
 
 	// define external obstacles
-	bc, err := spatial.NewBoxCreator(r3.Vector{2, 2, 2}, spatial.NewZeroPose(), "")
+	bc, err := spatial.NewBox(spatial.NewZeroPose(), r3.Vector{2, 2, 2}, "")
 	test.That(t, err, test.ShouldBeNil)
 	obstacles := make(map[string]spatial.Geometry)
-	obstacles["obstacle1"] = bc.NewGeometry(spatial.NewZeroPose())
-	obstacles["obstacle2"] = bc.NewGeometry(spatial.NewPoseFromPoint(r3.Vector{-130, 0, 300}))
+	obstacles["obstacle1"] = bc.Transform(spatial.NewZeroPose())
+	obstacles["obstacle2"] = bc.Transform(spatial.NewPoseFromPoint(r3.Vector{-130, 0, 300}))
+	worldState := &frame.WorldState{Obstacles: []*frame.GeometriesInFrame{frame.NewGeometriesInFrame(frame.World, obstacles)}}
 
 	// setup zero position as reference CollisionGraph and use it in handler
 	model, err := frame.ParseModelJSONFile(utils.ResolveFile("components/arm/xarm/xarm6_kinematics.json"), "")
 	test.That(t, err, test.ShouldBeNil)
+	fs := frame.NewEmptySimpleFrameSystem("test")
+	err = fs.AddFrame(model, fs.Frame(frame.World))
+	test.That(t, err, test.ShouldBeNil)
 	handler := &constraintHandler{}
-	handler.AddConstraint("collision", NewCollisionConstraint(model, zeroPos, obstacles, map[string]spatial.Geometry{}, false))
+	selfCollisionConstraint, err := newSelfCollisionConstraint(model, frame.StartPositions(fs), nil, true)
+	test.That(t, err, test.ShouldBeNil)
+	handler.AddConstraint(defaultSelfCollisionConstraintName, selfCollisionConstraint)
+	obstacleConstraint, err := newObstacleConstraint(model, fs, worldState, frame.StartPositions(fs), nil, true)
+	test.That(t, err, test.ShouldBeNil)
+	handler.AddConstraint(defaultObstacleConstraintName, obstacleConstraint)
 
 	// loop through cases and check constraint handler processes them correctly
 	for i, c := range cases {
 		t.Run(fmt.Sprintf("Test %d", i), func(t *testing.T) {
-			response, _ := handler.CheckConstraints(&ConstraintInput{StartInput: c.input, Frame: model})
+			response, _, failName := handler.CheckConstraints(&ConstraintInput{StartInput: c.input, Frame: model})
 			test.That(t, response, test.ShouldEqual, c.expected)
+			test.That(t, failName, test.ShouldEqual, c.failName)
 		})
 	}
 }
 
 var bt bool
 
-func BenchmarkCollisionConstraint(b *testing.B) {
+func BenchmarkCollisionConstraints(b *testing.B) {
 	// define external obstacles
-	zeroPos := frame.FloatsToInputs([]float64{0, 0, 0, 0, 0, 0})
-	bc, err := spatial.NewBoxCreator(r3.Vector{2, 2, 2}, spatial.NewZeroPose(), "")
+	bc, err := spatial.NewBox(spatial.NewZeroPose(), r3.Vector{2, 2, 2}, "")
 	test.That(b, err, test.ShouldBeNil)
 	obstacles := make(map[string]spatial.Geometry)
-	obstacles["obstacle1"] = bc.NewGeometry(spatial.NewZeroPose())
-	obstacles["obstacle2"] = bc.NewGeometry(spatial.NewPoseFromPoint(r3.Vector{-130, 0, 300}))
+	obstacles["obstacle1"] = bc.Transform(spatial.NewZeroPose())
+	obstacles["obstacle2"] = bc.Transform(spatial.NewPoseFromPoint(r3.Vector{-130, 0, 300}))
+	worldState := &frame.WorldState{Obstacles: []*frame.GeometriesInFrame{frame.NewGeometriesInFrame(frame.World, obstacles)}}
 
 	// setup zero position as reference CollisionGraph and use it in handler
 	model, err := frame.ParseModelJSONFile(utils.ResolveFile("components/arm/xarm/xarm6_kinematics.json"), "")
 	test.That(b, err, test.ShouldBeNil)
+	fs := frame.NewEmptySimpleFrameSystem("test")
+	err = fs.AddFrame(model, fs.Frame(frame.World))
+	test.That(b, err, test.ShouldBeNil)
 	handler := &constraintHandler{}
-	handler.AddConstraint("collision", NewCollisionConstraint(model, zeroPos, obstacles, map[string]spatial.Geometry{}, false))
-
+	selfCollisionConstraint, err := newSelfCollisionConstraint(model, frame.StartPositions(fs), nil, false)
+	test.That(b, err, test.ShouldBeNil)
+	handler.AddConstraint(defaultSelfCollisionConstraintName, selfCollisionConstraint)
+	obstacleConstraint, err := newObstacleConstraint(model, fs, worldState, frame.StartPositions(fs), nil, false)
+	test.That(b, err, test.ShouldBeNil)
+	handler.AddConstraint(defaultObstacleConstraintName, obstacleConstraint)
 	rseed := rand.New(rand.NewSource(1))
 	var b1 bool
 	var n int
@@ -236,7 +254,7 @@ func BenchmarkCollisionConstraint(b *testing.B) {
 	// loop through cases and check constraint handler processes them correctly
 	for n = 0; n < b.N; n++ {
 		rfloats := frame.GenerateRandomConfiguration(model, rseed)
-		b1, _ = handler.CheckConstraints(&ConstraintInput{StartInput: frame.FloatsToInputs(rfloats), Frame: model})
+		b1, _, _ = handler.CheckConstraints(&ConstraintInput{StartInput: frame.FloatsToInputs(rfloats), Frame: model})
 	}
 	bt = b1
 }

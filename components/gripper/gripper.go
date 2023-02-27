@@ -73,23 +73,22 @@ type Gripper interface {
 
 	generic.Generic
 	referenceframe.ModelFramer
+	resource.MovingCheckable
 }
 
 // A LocalGripper represents a Gripper that can report whether it is moving or not.
 type LocalGripper interface {
 	Gripper
-
-	resource.MovingCheckable
 }
 
 // NewUnimplementedInterfaceError is used when there is a failed interface check.
 func NewUnimplementedInterfaceError(actual interface{}) error {
-	return utils.NewUnimplementedInterfaceError((Gripper)(nil), actual)
+	return utils.NewUnimplementedInterfaceError((*Gripper)(nil), actual)
 }
 
 // NewUnimplementedLocalInterfaceError is used when there is a failed interface check.
 func NewUnimplementedLocalInterfaceError(actual interface{}) error {
-	return utils.NewUnimplementedInterfaceError((LocalGripper)(nil), actual)
+	return utils.NewUnimplementedInterfaceError((*LocalGripper)(nil), actual)
 }
 
 // WrapWithReconfigurable wraps a gripper with a reconfigurable and locking interface.
@@ -125,15 +124,7 @@ var (
 
 // FromRobot is a helper for getting the named Gripper from the given Robot.
 func FromRobot(r robot.Robot, name string) (Gripper, error) {
-	res, err := r.ResourceByName(Named(name))
-	if err != nil {
-		return nil, err
-	}
-	part, ok := res.(Gripper)
-	if !ok {
-		return nil, NewUnimplementedInterfaceError(res)
-	}
-	return part, nil
+	return robot.ResourceFromRobot[Gripper](r, Named(name))
 }
 
 // NamesFromRobot is a helper for getting all gripper names from the given Robot.
@@ -143,7 +134,7 @@ func NamesFromRobot(r robot.Robot) []string {
 
 // CreateStatus creates a status from the gripper.
 func CreateStatus(ctx context.Context, resource interface{}) (*commonpb.ActuatorStatus, error) {
-	gripper, ok := resource.(LocalGripper)
+	gripper, ok := resource.(Gripper)
 	if !ok {
 		return nil, NewUnimplementedLocalInterfaceError(resource)
 	}
@@ -217,6 +208,12 @@ func (g *reconfigurableGripper) ModelFrame() referenceframe.Model {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.actual.ModelFrame()
+}
+
+func (g *reconfigurableGripper) IsMoving(ctx context.Context) (bool, error) {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.actual.IsMoving(ctx)
 }
 
 type reconfigurableLocalGripper struct {

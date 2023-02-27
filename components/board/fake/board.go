@@ -16,6 +16,7 @@ import (
 	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/registry"
+	"go.viam.com/rdk/resource"
 )
 
 var _ = board.LocalBoard(&Board{})
@@ -60,7 +61,7 @@ func (config *Config) Validate(path string) error {
 	return nil
 }
 
-const modelName = "fake"
+var modelName = resource.NewDefaultModel("fake")
 
 func init() {
 	registry.RegisterComponent(
@@ -76,7 +77,7 @@ func init() {
 		}})
 
 	config.RegisterComponentAttributeMapConverter(
-		board.SubtypeName,
+		board.Subtype,
 		modelName,
 		func(attributes config.AttributeMap) (interface{}, error) {
 			var conf Config
@@ -320,23 +321,13 @@ func (h *I2CHandle) WriteByteData(ctx context.Context, register, data byte) erro
 	return errors.New("finish me")
 }
 
-// ReadWordData reads a word from the i2c channel.
-func (h *I2CHandle) ReadWordData(ctx context.Context, register byte) (uint16, error) {
-	return 0, errors.New("finish me")
-}
-
-// WriteWordData writes a word to the i2c channel.
-func (h *I2CHandle) WriteWordData(ctx context.Context, register byte, data uint16) error {
-	return errors.New("finish me")
-}
-
 // ReadBlockData reads the given number of bytes from the i2c channel.
 func (h *I2CHandle) ReadBlockData(ctx context.Context, register byte, numBytes uint8) ([]byte, error) {
 	return nil, errors.New("finish me")
 }
 
 // WriteBlockData writes the given bytes to the i2c channel.
-func (h *I2CHandle) WriteBlockData(ctx context.Context, register byte, numBytes uint8, data []byte) error {
+func (h *I2CHandle) WriteBlockData(ctx context.Context, register byte, data []byte) error {
 	return errors.New("finish me")
 }
 

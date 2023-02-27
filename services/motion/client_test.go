@@ -9,7 +9,6 @@ import (
 	"github.com/edaniels/golog"
 	"github.com/golang/geo/r3"
 	"github.com/pkg/errors"
-	commonpb "go.viam.com/api/common/v1"
 	servicepb "go.viam.com/api/service/motion/v1"
 	"go.viam.com/test"
 	"go.viam.com/utils"
@@ -17,6 +16,7 @@ import (
 	"google.golang.org/grpc"
 
 	"go.viam.com/rdk/components/arm"
+	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/components/gripper"
 	viamgrpc "go.viam.com/rdk/grpc"
 	"go.viam.com/rdk/referenceframe"
@@ -68,13 +68,13 @@ func TestClient(t *testing.T) {
 
 		client := motion.NewClientFromConn(context.Background(), conn, testMotionServiceName, logger)
 
-		receivedTransforms := make(map[string]*commonpb.Transform)
+		receivedTransforms := make(map[string]*referenceframe.LinkInFrame)
 		success := true
 		injectMS.MoveFunc = func(
 			ctx context.Context,
 			componentName resource.Name,
 			destination *referenceframe.PoseInFrame,
-			worldState *commonpb.WorldState,
+			worldState *referenceframe.WorldState,
 			extra map[string]interface{},
 		) (bool, error) {
 			return success, nil
@@ -83,70 +83,55 @@ func TestClient(t *testing.T) {
 			ctx context.Context,
 			componentName resource.Name,
 			destinationFrame string,
-			supplementalTransforms []*commonpb.Transform,
+			supplementalTransforms []*referenceframe.LinkInFrame,
 			extra map[string]interface{},
 		) (*referenceframe.PoseInFrame, error) {
-			for _, msg := range supplementalTransforms {
-				receivedTransforms[msg.GetReferenceFrame()] = msg
+			for _, tf := range supplementalTransforms {
+				receivedTransforms[tf.Name()] = tf
 			}
 			return referenceframe.NewPoseInFrame(
 				destinationFrame+componentName.Name, spatialmath.NewPoseFromPoint(r3.Vector{1, 2, 3})), nil
 		}
 
-		result, err := client.Move(
-			context.Background(), resourceName, grabPose,
-			&commonpb.WorldState{}, map[string]interface{}{},
-		)
+		result, err := client.Move(context.Background(), resourceName, grabPose, &referenceframe.WorldState{}, map[string]interface{}{})
 		test.That(t, err, test.ShouldBeNil)
 		test.That(t, result, test.ShouldEqual, success)
 
-		testPose := spatialmath.NewPoseFromOrientation(
+		testPose := spatialmath.NewPose(
 			r3.Vector{X: 1., Y: 2., Z: 3.},
 			&spatialmath.R4AA{Theta: math.Pi / 2, RX: 0., RY: 1., RZ: 0.},
 		)
-		transformMsgs := []*commonpb.Transform{
-			{
-				ReferenceFrame: "frame1",
-				PoseInObserverFrame: &commonpb.PoseInFrame{
-					ReferenceFrame: "arm1",
-					Pose:           spatialmath.PoseToProtobuf(testPose),
-				},
-			},
-			{
-				ReferenceFrame: "frame2",
-				PoseInObserverFrame: &commonpb.PoseInFrame{
-					ReferenceFrame: "frame1",
-					Pose:           spatialmath.PoseToProtobuf(testPose),
-				},
-			},
+
+		transforms := []*referenceframe.LinkInFrame{
+			referenceframe.NewLinkInFrame("arm1", testPose, "frame1", nil),
+			referenceframe.NewLinkInFrame("frame1", testPose, "frame2", nil),
 		}
-		msgMap := make(map[string]*commonpb.Transform)
-		for _, msg := range transformMsgs {
-			msgMap[msg.GetReferenceFrame()] = msg
+
+		tfMap := make(map[string]*referenceframe.LinkInFrame)
+		for _, tf := range transforms {
+			tfMap[tf.Name()] = tf
 		}
-		poseResult, err := client.GetPose(context.Background(), arm.Named("arm1"), "foo", transformMsgs, map[string]interface{}{})
+		poseResult, err := client.GetPose(context.Background(), arm.Named("arm1"), "foo", transforms, map[string]interface{}{})
 		test.That(t, err, test.ShouldBeNil)
-		test.That(t, poseResult.FrameName(), test.ShouldEqual, "fooarm1")
+		test.That(t, poseResult.Parent(), test.ShouldEqual, "fooarm1")
 		test.That(t, poseResult.Pose().Point().X, test.ShouldEqual, 1)
 		test.That(t, poseResult.Pose().Point().Y, test.ShouldEqual, 2)
 		test.That(t, poseResult.Pose().Point().Z, test.ShouldEqual, 3)
-		for key, msg := range msgMap {
-			receivedMsg := receivedTransforms[key]
-			receivedPF := receivedMsg.GetPoseInObserverFrame()
-			msgPF := msg.GetPoseInObserverFrame()
-			test.That(t, receivedMsg.GetReferenceFrame(), test.ShouldEqual, msg.GetReferenceFrame())
-			test.That(t, receivedPF.GetReferenceFrame(), test.ShouldEqual, msgPF.GetReferenceFrame())
-			receivedPose := receivedPF.GetPose()
-			msgPose := msgPF.GetPose()
-			test.That(t, receivedPose.X, test.ShouldAlmostEqual, msgPose.X)
-			test.That(t, receivedPose.Y, test.ShouldAlmostEqual, msgPose.Y)
-			test.That(t, receivedPose.Z, test.ShouldAlmostEqual, msgPose.Z)
-			test.That(t, receivedPose.OX, test.ShouldAlmostEqual, msgPose.OX)
-			test.That(t, receivedPose.OY, test.ShouldAlmostEqual, msgPose.OY)
-			test.That(t, receivedPose.OZ, test.ShouldAlmostEqual, msgPose.OZ)
-			test.That(t, receivedPose.Theta, test.ShouldAlmostEqual, msgPose.Theta)
+		for name, tf := range tfMap {
+			receivedTf := receivedTransforms[name]
+			test.That(t, tf.Name(), test.ShouldEqual, receivedTf.Name())
+			test.That(t, tf.Parent(), test.ShouldEqual, receivedTf.Parent())
+			test.That(t, spatialmath.PoseAlmostEqual(tf.Pose(), receivedTf.Pose()), test.ShouldBeTrue)
 		}
 		test.That(t, receivedTransforms, test.ShouldNotBeNil)
+
+		// DoCommand
+		injectMS.DoCommandFunc = generic.EchoFunc
+		resp, err := client.DoCommand(context.Background(), generic.TestCommand)
+		test.That(t, err, test.ShouldBeNil)
+		test.That(t, resp["command"], test.ShouldEqual, generic.TestCommand["command"])
+		test.That(t, resp["data"], test.ShouldEqual, generic.TestCommand["data"])
+
 		test.That(t, utils.TryClose(context.Background(), client), test.ShouldBeNil)
 		test.That(t, conn.Close(), test.ShouldBeNil)
 	})
@@ -164,7 +149,7 @@ func TestClient(t *testing.T) {
 			ctx context.Context,
 			componentName resource.Name,
 			grabPose *referenceframe.PoseInFrame,
-			worldState *commonpb.WorldState,
+			worldState *referenceframe.WorldState,
 			extra map[string]interface{},
 		) (bool, error) {
 			return false, passedErr
@@ -174,13 +159,13 @@ func TestClient(t *testing.T) {
 			ctx context.Context,
 			componentName resource.Name,
 			destinationFrame string,
-			supplementalTransform []*commonpb.Transform,
+			supplementalTransform []*referenceframe.LinkInFrame,
 			extra map[string]interface{},
 		) (*referenceframe.PoseInFrame, error) {
 			return nil, passedErr
 		}
 
-		resp, err := client2.Move(context.Background(), resourceName, grabPose, &commonpb.WorldState{}, map[string]interface{}{})
+		resp, err := client2.Move(context.Background(), resourceName, grabPose, &referenceframe.WorldState{}, map[string]interface{}{})
 		test.That(t, err.Error(), test.ShouldContainSubstring, passedErr.Error())
 		test.That(t, resp, test.ShouldEqual, false)
 		_, err = client2.GetPose(context.Background(), arm.Named("arm1"), "foo", nil, map[string]interface{}{})

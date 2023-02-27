@@ -6,7 +6,6 @@ import (
 	"sync"
 
 	"github.com/edaniels/golog"
-	commonpb "go.viam.com/api/common/v1"
 	servicepb "go.viam.com/api/service/motion/v1"
 	goutils "go.viam.com/utils"
 	"go.viam.com/utils/rpc"
@@ -43,23 +42,24 @@ type Service interface {
 		ctx context.Context,
 		componentName resource.Name,
 		destination *referenceframe.PoseInFrame,
-		worldState *commonpb.WorldState,
+		worldState *referenceframe.WorldState,
 		extra map[string]interface{},
 	) (bool, error)
 	MoveSingleComponent(
 		ctx context.Context,
 		componentName resource.Name,
 		destination *referenceframe.PoseInFrame,
-		worldState *commonpb.WorldState,
+		worldState *referenceframe.WorldState,
 		extra map[string]interface{},
 	) (bool, error)
 	GetPose(
 		ctx context.Context,
 		componentName resource.Name,
 		destinationFrame string,
-		supplementalTransforms []*commonpb.Transform,
+		supplementalTransforms []*referenceframe.LinkInFrame,
 		extra map[string]interface{},
 	) (*referenceframe.PoseInFrame, error)
+	resource.Generic
 }
 
 var (
@@ -85,20 +85,12 @@ func Named(name string) resource.Name {
 
 // NewUnimplementedInterfaceError is used when there is a failed interface check.
 func NewUnimplementedInterfaceError(actual interface{}) error {
-	return utils.NewUnimplementedInterfaceError((Service)(nil), actual)
+	return utils.NewUnimplementedInterfaceError((*Service)(nil), actual)
 }
 
 // FromRobot is a helper for getting the named motion service from the given Robot.
 func FromRobot(r robot.Robot, name string) (Service, error) {
-	resource, err := r.ResourceByName(Named(name))
-	if err != nil {
-		return nil, err
-	}
-	svc, ok := resource.(Service)
-	if !ok {
-		return nil, NewUnimplementedInterfaceError(resource)
-	}
-	return svc, nil
+	return robot.ResourceFromRobot[Service](r, Named(name))
 }
 
 type reconfigurableMotionService struct {
@@ -115,7 +107,7 @@ func (svc *reconfigurableMotionService) Move(
 	ctx context.Context,
 	componentName resource.Name,
 	destination *referenceframe.PoseInFrame,
-	worldState *commonpb.WorldState,
+	worldState *referenceframe.WorldState,
 	extra map[string]interface{},
 ) (bool, error) {
 	svc.mu.RLock()
@@ -127,7 +119,7 @@ func (svc *reconfigurableMotionService) MoveSingleComponent(
 	ctx context.Context,
 	componentName resource.Name,
 	destination *referenceframe.PoseInFrame,
-	worldState *commonpb.WorldState,
+	worldState *referenceframe.WorldState,
 	extra map[string]interface{},
 ) (bool, error) {
 	svc.mu.RLock()
@@ -139,12 +131,20 @@ func (svc *reconfigurableMotionService) GetPose(
 	ctx context.Context,
 	componentName resource.Name,
 	destinationFrame string,
-	supplementalTransforms []*commonpb.Transform,
+	supplementalTransforms []*referenceframe.LinkInFrame,
 	extra map[string]interface{},
 ) (*referenceframe.PoseInFrame, error) {
 	svc.mu.RLock()
 	defer svc.mu.RUnlock()
 	return svc.actual.GetPose(ctx, componentName, destinationFrame, supplementalTransforms, extra)
+}
+
+func (svc *reconfigurableMotionService) DoCommand(ctx context.Context,
+	cmd map[string]interface{},
+) (map[string]interface{}, error) {
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+	return svc.actual.DoCommand(ctx, cmd)
 }
 
 func (svc *reconfigurableMotionService) Close(ctx context.Context) error {

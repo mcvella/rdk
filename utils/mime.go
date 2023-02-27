@@ -16,6 +16,9 @@ const (
 	// MimeTypeRawRGBALazy is a lazy MimeTypeRawRGBA.
 	MimeTypeRawRGBALazy = MimeTypeRawRGBA + "+" + MimeTypeSuffixLazy
 
+	// MimeTypeRawDepth is for depth images.
+	MimeTypeRawDepth = "image/vnd.viam.dep"
+
 	// MimeTypeJPEG is regular jpgs.
 	MimeTypeJPEG = "image/jpeg"
 
@@ -37,6 +40,9 @@ const (
 
 // WithLazyMIMEType attaches the lazy suffix to a MIME.
 func WithLazyMIMEType(mimeType string) string {
+	if _, has := CheckLazyMIMEType(mimeType); has {
+		return mimeType
+	}
 	return fmt.Sprintf("%s+%s", mimeType, MimeTypeSuffixLazy)
 }
 

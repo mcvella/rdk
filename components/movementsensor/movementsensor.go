@@ -85,10 +85,11 @@ func Named(name string) resource.Name {
 
 // A MovementSensor reports information about the robot's direction, position and speed.
 type MovementSensor interface {
-	Position(ctx context.Context, extra map[string]interface{}) (*geo.Point, float64, error)                // (lat, long), altitide (mm)
+	Position(ctx context.Context, extra map[string]interface{}) (*geo.Point, float64, error)                // (lat, long), altitude (mm)
 	LinearVelocity(ctx context.Context, extra map[string]interface{}) (r3.Vector, error)                    // mm / sec
 	AngularVelocity(ctx context.Context, extra map[string]interface{}) (spatialmath.AngularVelocity, error) // radians / sec
-	CompassHeading(ctx context.Context, extra map[string]interface{}) (float64, error)                      // [0->360)
+	LinearAcceleration(ctx context.Context, extra map[string]interface{}) (r3.Vector, error)
+	CompassHeading(ctx context.Context, extra map[string]interface{}) (float64, error) // [0->360)
 	Orientation(ctx context.Context, extra map[string]interface{}) (spatialmath.Orientation, error)
 	Properties(ctx context.Context, extra map[string]interface{}) (*Properties, error)
 	Accuracy(ctx context.Context, extra map[string]interface{}) (map[string]float32, error) // in mm
@@ -119,25 +120,17 @@ func FromDependencies(deps registry.Dependencies, name string) (MovementSensor, 
 
 // NewUnimplementedInterfaceError is used when there is a failed interface check.
 func NewUnimplementedInterfaceError(actual interface{}) error {
-	return utils.NewUnimplementedInterfaceError((MovementSensor)(nil), actual)
+	return utils.NewUnimplementedInterfaceError((*MovementSensor)(nil), actual)
 }
 
 // DependencyTypeError is used when a resource doesn't implement the expected interface.
-func DependencyTypeError(name, actual interface{}) error {
-	return utils.DependencyTypeError(name, (MovementSensor)(nil), actual)
+func DependencyTypeError(name string, actual interface{}) error {
+	return utils.DependencyTypeError(name, (*MovementSensor)(nil), actual)
 }
 
 // FromRobot is a helper for getting the named MovementSensor from the given Robot.
 func FromRobot(r robot.Robot, name string) (MovementSensor, error) {
-	res, err := r.ResourceByName(Named(name))
-	if err != nil {
-		return nil, err
-	}
-	part, ok := res.(MovementSensor)
-	if !ok {
-		return nil, NewUnimplementedInterfaceError(res)
-	}
-	return part, nil
+	return robot.ResourceFromRobot[MovementSensor](r, Named(name))
 }
 
 // NamesFromRobot is a helper for getting all MovementSensor names from the given Robot.
@@ -149,18 +142,25 @@ func NamesFromRobot(r robot.Robot) []string {
 func Readings(ctx context.Context, g MovementSensor, extra map[string]interface{}) (map[string]interface{}, error) {
 	readings := map[string]interface{}{}
 
-	pos, altitide, err := g.Position(ctx, extra)
+	pos, altitude, err := g.Position(ctx, extra)
 	if err != nil && !errors.Is(err, ErrMethodUnimplementedPosition) {
 		return nil, err
 	}
+
 	readings["position"] = pos
-	readings["altitide"] = altitide
+	readings["altitude"] = altitude
 
 	vel, err := g.LinearVelocity(ctx, extra)
 	if err != nil && !errors.Is(err, ErrMethodUnimplementedLinearVelocity) {
 		return nil, err
 	}
 	readings["linear_velocity"] = vel
+
+	la, err := g.LinearAcceleration(ctx, extra)
+	if err != nil && !errors.Is(err, ErrMethodUnimplementedLinearAcceleration) {
+		return nil, err
+	}
+	readings["linear_acceleration"] = la
 
 	avel, err := g.AngularVelocity(ctx, extra)
 	if err != nil && !errors.Is(err, ErrMethodUnimplementedAngularVelocity) {
@@ -215,6 +215,12 @@ func (r *reconfigurableMovementSensor) Position(ctx context.Context, extra map[s
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.actual.Position(ctx, extra)
+}
+
+func (r *reconfigurableMovementSensor) LinearAcceleration(ctx context.Context, extra map[string]interface{}) (r3.Vector, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.actual.LinearAcceleration(ctx, extra)
 }
 
 func (r *reconfigurableMovementSensor) AngularVelocity(

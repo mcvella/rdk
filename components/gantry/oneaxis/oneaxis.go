@@ -10,7 +10,6 @@ import (
 	"github.com/golang/geo/r3"
 	"github.com/pkg/errors"
 	"go.uber.org/multierr"
-	commonpb "go.viam.com/api/common/v1"
 	utils "go.viam.com/utils"
 
 	"go.viam.com/rdk/components/board"
@@ -21,22 +20,23 @@ import (
 	"go.viam.com/rdk/operation"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/registry"
+	"go.viam.com/rdk/resource"
 	spatial "go.viam.com/rdk/spatialmath"
 	rdkutils "go.viam.com/rdk/utils"
 )
 
-const modelname = "oneaxis"
+var modelname = resource.NewDefaultModel("oneaxis")
 
 // AttrConfig is used for converting oneAxis config attributes.
 type AttrConfig struct {
-	Board           string                    `json:"board,omitempty"` // used to read limit switch pins and control motor with gpio pins
-	Motor           string                    `json:"motor"`
-	LimitSwitchPins []string                  `json:"limit_pins,omitempty"`
-	LimitPinEnabled *bool                     `json:"limit_pin_enabled_high,omitempty"`
-	LengthMm        float64                   `json:"length_mm"`
-	MmPerRevolution float64                   `json:"mm_per_rev,omitempty"`
-	GantryRPM       float64                   `json:"gantry_rpm,omitempty"`
-	Axis            spatial.TranslationConfig `json:"axis"`
+	Board           string    `json:"board,omitempty"` // used to read limit switch pins and control motor with gpio pins
+	Motor           string    `json:"motor"`
+	LimitSwitchPins []string  `json:"limit_pins,omitempty"`
+	LimitPinEnabled *bool     `json:"limit_pin_enabled_high,omitempty"`
+	LengthMm        float64   `json:"length_mm"`
+	MmPerRevolution float64   `json:"mm_per_rev,omitempty"`
+	GantryRPM       float64   `json:"gantry_rpm,omitempty"`
+	Axis            r3.Vector `json:"axis"`
 }
 
 // Validate ensures all parts of the config are valid.
@@ -101,7 +101,7 @@ func init() {
 		},
 	})
 
-	config.RegisterComponentAttributeMapConverter(gantry.SubtypeName, modelname,
+	config.RegisterComponentAttributeMapConverter(gantry.Subtype, modelname,
 		func(attributes config.AttributeMap) (interface{}, error) {
 			var conf AttrConfig
 			return config.TransformAttributeMapToStruct(&conf, attributes)
@@ -168,7 +168,7 @@ func newOneAxis(ctx context.Context, deps registry.Dependencies, config config.C
 		lengthMm:        conf.LengthMm,
 		mmPerRevolution: conf.MmPerRevolution,
 		rpm:             conf.GantryRPM,
-		axis:            r3.Vector(conf.Axis),
+		axis:            conf.Axis,
 	}
 
 	switch len(oAx.limitSwitchPins) {
@@ -384,7 +384,7 @@ func (g *oneAxis) Lengths(ctx context.Context, extra map[string]interface{}) ([]
 func (g *oneAxis) MoveToPosition(
 	ctx context.Context,
 	positions []float64,
-	worldState *commonpb.WorldState,
+	worldState *referenceframe.WorldState,
 	extra map[string]interface{},
 ) error {
 	ctx, done := g.opMgr.New(ctx)
@@ -482,5 +482,5 @@ func (g *oneAxis) CurrentInputs(ctx context.Context) ([]referenceframe.Input, er
 
 // GoToInputs moves the gantry to a goal position in the Gantry frame.
 func (g *oneAxis) GoToInputs(ctx context.Context, goal []referenceframe.Input) error {
-	return g.MoveToPosition(ctx, referenceframe.InputsToFloats(goal), &commonpb.WorldState{}, nil)
+	return g.MoveToPosition(ctx, referenceframe.InputsToFloats(goal), &referenceframe.WorldState{}, nil)
 }

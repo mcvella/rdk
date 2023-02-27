@@ -15,10 +15,11 @@ import (
 	"go.viam.com/rdk/components/audioinput"
 	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/registry"
+	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/utils"
 )
 
-const model = "microphone"
+var model = resource.NewDefaultModel("microphone")
 
 func init() {
 	registry.RegisterComponent(
@@ -37,7 +38,7 @@ func init() {
 			return newMicrophoneSource(attrs, logger)
 		}})
 
-	config.RegisterComponentAttributeMapConverter(audioinput.SubtypeName, model,
+	config.RegisterComponentAttributeMapConverter(audioinput.Subtype, model,
 		func(attributes config.AttributeMap) (interface{}, error) {
 			var conf Attrs
 			attrs, err := config.TransformAttributeMapToStruct(&conf, attributes)
@@ -76,33 +77,40 @@ func newMicrophoneSource(attrs *Attrs, logger golog.Logger) (audioinput.AudioInp
 			return nil, err
 		}
 	}
+	all := gostream.QueryAudioDevices()
 
-	labels := gostream.QueryAudioDeviceLabels()
-	for _, label := range labels {
-		if debug {
-			logger.Debugf("%s", label)
-		}
-
-		if pattern != nil && !pattern.MatchString(label) {
-			if debug {
-				logger.Debug("\t skipping because of pattern")
+	for _, info := range all {
+		logger.Debugf("%s", info.ID)
+		logger.Debugf("\t labels: %v", info.Labels)
+		for _, label := range info.Labels {
+			if pattern != nil && !pattern.MatchString(label) {
+				if debug {
+					logger.Debug("\t skipping because of pattern")
+				}
+				continue
 			}
-			continue
-		}
-
-		s, err := tryMicrophoneOpen(label, gostream.DefaultConstraints, logger)
-		if err == nil {
-			if debug {
-				logger.Debug("\t USING")
+			for _, p := range info.Properties {
+				logger.Debugf("\t %+v", p.Audio)
+				if p.Audio.ChannelCount == 0 {
+					if debug {
+						logger.Debug("\t skipping because audio channels are empty")
+					}
+					continue
+				}
+				s, err := tryMicrophoneOpen(label, gostream.DefaultConstraints, logger)
+				if err == nil {
+					if debug {
+						logger.Debug("\t USING")
+					}
+					return s, nil
+				}
+				if debug {
+					logger.Debugw("cannot open driver with properties", "properties", p,
+						"error", err)
+				}
 			}
-
-			return s, nil
-		}
-		if debug {
-			logger.Debugf("\t %w", err)
 		}
 	}
-
 	return nil, errors.New("found no microphones")
 }
 
@@ -115,5 +123,6 @@ func tryMicrophoneOpen(
 	if err != nil {
 		return nil, err
 	}
+	// TODO(XXX): implement LivenessMonitor
 	return audioinput.NewFromSource(source)
 }

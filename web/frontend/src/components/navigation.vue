@@ -1,11 +1,13 @@
 <script setup lang="ts">
 
+// @ts-nocheck TODO: fix typecheck errors in https://viam.atlassian.net/browse/RSDK-1897
 import { ref, onUnmounted } from 'vue';
 import { grpc } from '@improbable-eng/grpc-web';
 import { toast } from '../lib/toast';
 import { filterResources } from '../lib/resource';
 import { Client, commonApi, robotApi, navigationApi, type ServiceError } from '@viamrobotics/sdk';
 import { Struct } from 'google-protobuf/google/protobuf/struct_pb';
+import { rcLogConditionally } from '../lib/log';
 
 interface Props {
   resources: commonApi.ResourceName.AsObject[]
@@ -64,6 +66,8 @@ const setNavigationMode = (mode: 'manual' | 'waypoint') => {
   const req = new navigationApi.SetModeRequest();
   req.setName(props.name);
   req.setMode(pbMode);
+
+  rcLogConditionally(req);
   props.client.navigationService.setMode(req, new grpc.Metadata(), grpcCallback);
 };
 
@@ -99,6 +103,7 @@ const setNavigationLocation = () => {
     })
   );
 
+  rcLogConditionally(req);
   props.client.genericService.doCommand(req, new grpc.Metadata(), grpcCallback);
 };
 
@@ -122,6 +127,7 @@ const initNavigation = async () => {
     req.setName(props.name);
     req.setLocation(point);
 
+    rcLogConditionally(req);
     props.client.navigationService.addWaypoint(req, new grpc.Metadata(), grpcCallback);
   });
 
@@ -133,6 +139,7 @@ const initNavigation = async () => {
     const req = new navigationApi.GetWaypointsRequest();
     req.setName(props.name);
 
+    rcLogConditionally(req);
     props.client.navigationService.getWaypoints(req, new grpc.Metadata(), (err, resp) => {
       grpcCallback(err, resp, false);
 
@@ -181,6 +188,8 @@ const initNavigation = async () => {
           const waypointRequest = new navigationApi.RemoveWaypointRequest();
           waypointRequest.setName(props.name);
           waypointRequest.setId(waypoint.getId());
+
+          rcLogConditionally(req);
           props.client.navigationService.removeWaypoint(waypointRequest, new grpc.Metadata(), grpcCallback);
         });
       }
@@ -203,8 +212,9 @@ const initNavigation = async () => {
 
   const updateLocation = () => {
     const req = new navigationApi.GetLocationRequest();
-
     req.setName(props.name);
+
+    rcLogConditionally(req);
     props.client.navigationService.getLocation(req, new grpc.Metadata(), (err, resp) => {
       grpcCallback(err, resp, false);
 

@@ -197,6 +197,7 @@ do_brew(){
 }
 
 # Main install routine
+
 if [ "$(uname)" == "Linux" ]; then
 	if [ "$(grep VERSION_CODENAME /etc/os-release | cut -d= -f2)" == "bullseye" ]; then
 		do_bullseye

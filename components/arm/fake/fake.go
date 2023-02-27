@@ -3,12 +3,9 @@ package fake
 
 import (
 	"context"
-	// for arm model.
-	_ "embed"
 
 	"github.com/edaniels/golog"
 	"github.com/pkg/errors"
-	commonpb "go.viam.com/api/common/v1"
 	pb "go.viam.com/api/component/arm/v1"
 
 	"go.viam.com/rdk/components/arm"
@@ -21,28 +18,51 @@ import (
 	"go.viam.com/rdk/motionplan"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/registry"
+	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/spatialmath"
 )
 
-// ModelName is the string used to refer to the fake arm model.
-const ModelName = "fake"
+// errAttrCfgPopulation is the returned error if the AttrConfig's fields are fully populated.
+var errAttrCfgPopulation = errors.New("can only populate either ArmModel or ModelPath - not both")
 
-//go:embed fake_model.json
-var fakeModelJSON []byte
+// ModelName is the string used to refer to the fake arm model.
+var ModelName = resource.NewDefaultModel("fake")
 
 // AttrConfig is used for converting config attributes.
 type AttrConfig struct {
-	FailNew      bool   `json:"fail_new"`
-	FailValidate bool   `json:"fail_validate"`
-	ArmModel     string `json:"arm-model"`
+	ArmModel      string `json:"arm-model,omitempty"`
+	ModelFilePath string `json:"model-path,omitempty"`
+}
+
+func modelFromName(model, name string) (referenceframe.Model, error) {
+	switch resource.ModelName(model) {
+	case xarm.ModelName6DOF.Name:
+		return xarm.Model(name, 6)
+	case xarm.ModelName7DOF.Name:
+		return xarm.Model(name, 7)
+	case ur.ModelName.Name:
+		return ur.Model(name)
+	case yahboom.ModelName.Name:
+		return yahboom.Model(name)
+	case eva.ModelName.Name:
+		return eva.Model(name)
+	default:
+		return nil, errors.Errorf("fake arm cannot be created, unsupported arm_model: %s", model)
+	}
 }
 
 // Validate ensures all parts of the config are valid.
 func (config *AttrConfig) Validate(path string) error {
-	if config.FailValidate {
-		return errors.New("whoops! failed to validate")
+	var err error
+	switch {
+	case config.ArmModel != "" && config.ModelFilePath != "":
+		err = errAttrCfgPopulation
+	case config.ArmModel != "" && config.ModelFilePath == "":
+		_, err = modelFromName(config.ArmModel, "")
+	case config.ArmModel == "" && config.ModelFilePath != "":
+		_, err = referenceframe.ModelFromPath(config.ModelFilePath, "")
 	}
-	return nil
+	return err
 }
 
 func init() {
@@ -53,7 +73,7 @@ func init() {
 	})
 
 	config.RegisterComponentAttributeMapConverter(
-		arm.SubtypeName,
+		arm.Subtype,
 		ModelName,
 		func(attributes config.AttributeMap) (interface{}, error) {
 			var conf AttrConfig
@@ -65,33 +85,23 @@ func init() {
 
 // NewArm returns a new fake arm.
 func NewArm(cfg config.Component, logger golog.Logger) (arm.LocalArm, error) {
-	var model referenceframe.Model
-	var err error
-	if cfg.ConvertedAttributes != nil {
-		converted := cfg.ConvertedAttributes.(*AttrConfig)
+	var (
+		model referenceframe.Model
+		err   error
+	)
 
-		if converted.FailNew {
-			return nil, errors.New("whoops! failed to start up")
-		}
-
-		switch converted.ArmModel {
-		case xarm.ModelName6DOF:
-			model, err = xarm.Model(cfg.Name, 6)
-		case xarm.ModelName7DOF:
-			model, err = xarm.Model(cfg.Name, 7)
-		case ur.ModelName:
-			model, err = ur.Model(cfg.Name)
-		case yahboom.ModelName:
-			model, err = yahboom.Model(cfg.Name)
-		case eva.ModelName:
-			model, err = eva.Model(cfg.Name)
-		case ModelName, "":
-			model, err = referenceframe.UnmarshalModelJSON(fakeModelJSON, cfg.Name)
-		default:
-			return nil, errors.Errorf("fake arm cannot be created, unsupported arm_model: %s", cfg.ConvertedAttributes.(*AttrConfig).ArmModel)
-		}
-	} else {
-		model, err = referenceframe.UnmarshalModelJSON(fakeModelJSON, cfg.Name)
+	modelPath := cfg.ConvertedAttributes.(*AttrConfig).ModelFilePath
+	armModel := cfg.ConvertedAttributes.(*AttrConfig).ArmModel
+	switch {
+	case armModel != "" && modelPath != "":
+		err = errAttrCfgPopulation
+	case armModel != "":
+		model, err = modelFromName(cfg.ConvertedAttributes.(*AttrConfig).ArmModel, cfg.Name)
+	case modelPath != "":
+		model, err = referenceframe.ModelFromPath(modelPath, cfg.Name)
+	default:
+		// if no arm model is specified, we return an empty arm with 0 dof and 0 spatial transformation
+		model = referenceframe.NewSimpleModel(cfg.Name)
 	}
 	if err != nil {
 		return nil, err
@@ -126,14 +136,14 @@ func (a *Arm) EndPosition(ctx context.Context, extra map[string]interface{}) (sp
 	if err != nil {
 		return nil, err
 	}
-	return motionplan.ComputePosition(a.model, joints)
+	return motionplan.ComputeOOBPosition(a.model, joints)
 }
 
 // MoveToPosition sets the position.
 func (a *Arm) MoveToPosition(
 	ctx context.Context,
 	pos spatialmath.Pose,
-	worldState *commonpb.WorldState,
+	worldState *referenceframe.WorldState,
 	extra map[string]interface{},
 ) error {
 	joints, err := a.JointPositions(ctx, extra)
@@ -149,6 +159,9 @@ func (a *Arm) MoveToPosition(
 
 // MoveToJointPositions sets the joints.
 func (a *Arm) MoveToJointPositions(ctx context.Context, joints *pb.JointPositions, extra map[string]interface{}) error {
+	if err := arm.CheckDesiredJointPositions(ctx, a, joints.Values); err != nil {
+		return err
+	}
 	inputs := a.model.InputFromProtobuf(joints)
 	pos, err := a.model.Transform(inputs)
 	if err != nil {
@@ -186,7 +199,11 @@ func (a *Arm) CurrentInputs(ctx context.Context) ([]referenceframe.Input, error)
 
 // GoToInputs TODO.
 func (a *Arm) GoToInputs(ctx context.Context, goal []referenceframe.Input) error {
-	return a.MoveToJointPositions(ctx, a.model.ProtobufFromInput(goal), nil)
+	positionDegs := a.model.ProtobufFromInput(goal)
+	if err := arm.CheckDesiredJointPositions(ctx, a, positionDegs.Values); err != nil {
+		return err
+	}
+	return a.MoveToJointPositions(ctx, positionDegs, nil)
 }
 
 // Close does nothing.

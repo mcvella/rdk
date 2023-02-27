@@ -3,8 +3,6 @@ package inject
 import (
 	"context"
 
-	commonpb "go.viam.com/api/common/v1"
-
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/services/motion"
@@ -18,16 +16,18 @@ type MotionService struct {
 		ctx context.Context,
 		componentName resource.Name,
 		grabPose *referenceframe.PoseInFrame,
-		worldState *commonpb.WorldState,
+		worldState *referenceframe.WorldState,
 		extra map[string]interface{},
 	) (bool, error)
 	GetPoseFunc func(
 		ctx context.Context,
 		componentName resource.Name,
 		destinationFrame string,
-		supplementalTransforms []*commonpb.Transform,
+		supplementalTransforms []*referenceframe.LinkInFrame,
 		extra map[string]interface{},
 	) (*referenceframe.PoseInFrame, error)
+	DoCommandFunc func(ctx context.Context,
+		cmd map[string]interface{}) (map[string]interface{}, error)
 }
 
 // Move calls the injected Move or the real variant.
@@ -35,7 +35,7 @@ func (mgs *MotionService) Move(
 	ctx context.Context,
 	componentName resource.Name,
 	grabPose *referenceframe.PoseInFrame,
-	worldState *commonpb.WorldState,
+	worldState *referenceframe.WorldState,
 	extra map[string]interface{},
 ) (bool, error) {
 	if mgs.MoveFunc == nil {
@@ -49,7 +49,7 @@ func (mgs *MotionService) MoveSingleComponent(
 	ctx context.Context,
 	componentName resource.Name,
 	grabPose *referenceframe.PoseInFrame,
-	worldState *commonpb.WorldState,
+	worldState *referenceframe.WorldState,
 	extra map[string]interface{},
 ) (bool, error) {
 	if mgs.MoveFunc == nil {
@@ -63,11 +63,21 @@ func (mgs *MotionService) GetPose(
 	ctx context.Context,
 	componentName resource.Name,
 	destinationFrame string,
-	supplementalTransforms []*commonpb.Transform,
+	supplementalTransforms []*referenceframe.LinkInFrame,
 	extra map[string]interface{},
 ) (*referenceframe.PoseInFrame, error) {
 	if mgs.GetPoseFunc == nil {
 		return mgs.Service.GetPose(ctx, componentName, destinationFrame, supplementalTransforms, extra)
 	}
 	return mgs.GetPoseFunc(ctx, componentName, destinationFrame, supplementalTransforms, extra)
+}
+
+// DoCommand calls the injected DoCommand or the real variant.
+func (mgs *MotionService) DoCommand(ctx context.Context,
+	cmd map[string]interface{},
+) (map[string]interface{}, error) {
+	if mgs.DoCommandFunc == nil {
+		return mgs.Service.DoCommand(ctx, cmd)
+	}
+	return mgs.DoCommandFunc(ctx, cmd)
 }

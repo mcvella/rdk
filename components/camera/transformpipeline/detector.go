@@ -34,7 +34,7 @@ type detectorSource struct {
 func newDetectionsTransform(
 	ctx context.Context,
 	source gostream.VideoSource, r robot.Robot, am config.AttributeMap,
-) (gostream.VideoSource, camera.StreamType, error) {
+) (gostream.VideoSource, camera.ImageType, error) {
 	conf, err := config.TransformAttributeMapToStruct(&(detectorAttrs{}), am)
 	if err != nil {
 		return nil, camera.UnspecifiedStream, err
@@ -43,13 +43,16 @@ func newDetectionsTransform(
 	if !ok {
 		return nil, camera.UnspecifiedStream, rdkutils.NewUnexpectedTypeError(attrs, conf)
 	}
-	var cameraModel *transform.PinholeCameraModel
-	if cameraSrc, ok := source.(camera.Camera); ok {
-		props, err := cameraSrc.Properties(ctx)
-		if err != nil {
-			return nil, camera.UnspecifiedStream, err
-		}
-		cameraModel = &transform.PinholeCameraModel{props.IntrinsicParams, props.DistortionParams}
+
+	props, err := propsFromVideoSource(ctx, source)
+	if err != nil {
+		return nil, camera.UnspecifiedStream, err
+	}
+	var cameraModel transform.PinholeCameraModel
+	cameraModel.PinholeCameraIntrinsics = props.IntrinsicParams
+
+	if props.DistortionParams != nil {
+		cameraModel.Distortion = props.DistortionParams
 	}
 	confFilter := objectdetection.NewScoreFilter(attrs.ConfidenceThreshold)
 	detector := &detectorSource{
@@ -58,11 +61,11 @@ func newDetectionsTransform(
 		confFilter,
 		r,
 	}
-	cam, err := camera.NewFromReader(ctx, detector, cameraModel, camera.ColorStream)
+	cam, err := camera.NewFromReader(ctx, detector, &cameraModel, camera.ColorStream)
 	return cam, camera.ColorStream, err
 }
 
-// Next returns the image overlaid with the detection bounding boxes.
+// Read returns the image overlaid with the detection bounding boxes.
 func (ds *detectorSource) Read(ctx context.Context) (image.Image, func(), error) {
 	ctx, span := trace.StartSpan(ctx, "camera::transformpipeline::detector::Read")
 	defer span.End()

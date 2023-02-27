@@ -9,7 +9,7 @@ import (
 	"go.viam.com/utils/protoutils"
 	"go.viam.com/utils/rpc"
 
-	"go.viam.com/rdk/components/generic"
+	rprotoutils "go.viam.com/rdk/protoutils"
 )
 
 // client implements MotorServiceClient.
@@ -139,5 +139,13 @@ func (c *client) IsPowered(ctx context.Context, extra map[string]interface{}) (b
 }
 
 func (c *client) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-	return generic.DoFromConnection(ctx, c.conn, c.name, cmd)
+	return rprotoutils.DoFromResourceClient(ctx, c.client, c.name, cmd)
+}
+
+func (c *client) IsMoving(ctx context.Context) (bool, error) {
+	resp, err := c.client.IsMoving(ctx, &pb.IsMovingRequest{Name: c.name})
+	if err != nil {
+		return false, err
+	}
+	return resp.IsMoving, nil
 }

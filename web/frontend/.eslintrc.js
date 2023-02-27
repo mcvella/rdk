@@ -16,6 +16,7 @@ module.exports = {
     '@typescript-eslint',
     'unicorn',
     'tailwindcss',
+    'promise',
   ],
   extends: [
     'plugin:@typescript-eslint/recommended',
@@ -25,6 +26,7 @@ module.exports = {
     'plugin:vue/vue3-essential',
     'plugin:vue/vue3-strongly-recommended',
     'plugin:vue/vue3-recommended',
+    'plugin:promise/recommended',
   ],
   ignorePatterns: ['**/node_modules/**', '*.json', '**/protos/**'],
   rules: {
@@ -49,6 +51,7 @@ module.exports = {
     'max-params': 'off',
     'max-statements': 'off',
     'multiline-ternary': ['error', 'always-multiline'],
+    "no-shadow": "off",
     'prefer-destructuring': [
       'error', {
         AssignmentExpression: { array: false, object: false },
@@ -151,6 +154,10 @@ module.exports = {
     '@typescript-eslint/no-explicit-any': 'error',
     '@typescript-eslint/no-non-null-assertion': 'off',
     '@typescript-eslint/ban-ts-comment': 'warn',
+    '@typescript-eslint/no-shadow': ['error'], // https://github.com/typescript-eslint/typescript-eslint/issues/2483#issuecomment-687095358
+
+    // Promise
+    'promise/prefer-await-to-then': 'error',
   },
   settings: {
     'import/extensions': ['.vue'],

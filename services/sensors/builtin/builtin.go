@@ -8,6 +8,7 @@ import (
 	"github.com/edaniels/golog"
 	"github.com/pkg/errors"
 
+	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/components/sensor"
 	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/registry"
@@ -16,12 +17,12 @@ import (
 )
 
 func init() {
-	registry.RegisterService(sensors.Subtype, resource.DefaultModelName, registry.Service{
+	registry.RegisterService(sensors.Subtype, resource.DefaultServiceModel, registry.Service{
 		Constructor: func(ctx context.Context, deps registry.Dependencies, c config.Service, logger golog.Logger) (interface{}, error) {
 			return NewBuiltIn(ctx, deps, c, logger)
 		},
 	})
-	resource.AddDefaultService(sensors.Named(resource.DefaultModelName))
+	resource.AddDefaultService(sensors.Named(resource.DefaultServiceName))
 }
 
 // NewBuiltIn returns a new default sensor service for the given robot.
@@ -34,6 +35,7 @@ func NewBuiltIn(ctx context.Context, deps registry.Dependencies, config config.S
 }
 
 type builtIn struct {
+	generic.Unimplemented
 	mu      sync.RWMutex
 	sensors map[resource.Name]sensor.Sensor
 	logger  golog.Logger

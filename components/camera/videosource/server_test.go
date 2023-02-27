@@ -108,6 +108,16 @@ func TestServerSource(t *testing.T) {
 	test.That(t, stream.Close(context.Background()), test.ShouldBeNil)
 	test.That(t, img, test.ShouldResemble, lazyPng)
 
+	// Requests for lazy JPEG can return lazy PNG
+	lazyJPEGCtx := gostream.WithMIMETypeHint(context.Background(), utils.WithLazyMIMEType(utils.MimeTypeJPEG))
+	img, release, err = camera.ReadImage(
+		lazyJPEGCtx,
+		cam,
+	)
+	test.That(t, err, test.ShouldBeNil)
+	defer release()
+	test.That(t, img, test.ShouldResemble, lazyPng)
+
 	img, release, err = camera.ReadImage(
 		gostream.WithMIMETypeHint(context.Background(), utils.MimeTypePNG),
 		cam,
@@ -202,4 +212,28 @@ func TestDualServerSource(t *testing.T) {
 	// compare point clouds, should be the same
 	test.That(t, pc2, test.ShouldResemble, pc1)
 	test.That(t, cam2.Close(context.Background()), test.ShouldBeNil)
+}
+
+func TestServerError(t *testing.T) {
+	logger := golog.NewTestLogger(t)
+	//nolint:dogsled
+	router, _, _, _ := createTestRouter(t)
+	svr := httptest.NewServer(router)
+	defer svr.Close()
+
+	attrs := ServerAttrs{
+		// we expect a 404 error of MIME type "text/plain"
+		URL:    svr.URL + "/bad_path",
+		Stream: "color",
+	}
+
+	cam, err := NewServerSource(context.Background(), &attrs, logger)
+	test.That(t, err, test.ShouldBeNil)
+
+	lazyCtx := gostream.WithMIMETypeHint(context.Background(), utils.WithLazyMIMEType(utils.MimeTypeJPEG))
+	img, release, err := camera.ReadImage(lazyCtx, cam)
+
+	test.That(t, err, test.ShouldNotBeNil)
+	test.That(t, img, test.ShouldBeNil)
+	test.That(t, release, test.ShouldBeNil)
 }

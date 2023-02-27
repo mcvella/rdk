@@ -5,9 +5,11 @@ import (
 	"context"
 
 	"github.com/pkg/errors"
+	commonpb "go.viam.com/api/common/v1"
 	pb "go.viam.com/api/component/servo/v1"
 
 	"go.viam.com/rdk/operation"
+	"go.viam.com/rdk/protoutils"
 	"go.viam.com/rdk/subtype"
 )
 
@@ -40,7 +42,7 @@ func (server *subtypeServer) Move(ctx context.Context, req *pb.MoveRequest) (*pb
 	if err != nil {
 		return nil, err
 	}
-	return &pb.MoveResponse{}, servo.Move(ctx, uint8(req.GetAngleDeg()), req.Extra.AsMap())
+	return &pb.MoveResponse{}, servo.Move(ctx, req.GetAngleDeg(), req.Extra.AsMap())
 }
 
 func (server *subtypeServer) GetPosition(
@@ -55,7 +57,7 @@ func (server *subtypeServer) GetPosition(
 	if err != nil {
 		return nil, err
 	}
-	return &pb.GetPositionResponse{PositionDeg: uint32(angleDeg)}, nil
+	return &pb.GetPositionResponse{PositionDeg: angleDeg}, nil
 }
 
 func (server *subtypeServer) Stop(ctx context.Context, req *pb.StopRequest) (*pb.StopResponse, error) {
@@ -65,4 +67,28 @@ func (server *subtypeServer) Stop(ctx context.Context, req *pb.StopRequest) (*pb
 		return nil, err
 	}
 	return &pb.StopResponse{}, servo.Stop(ctx, req.Extra.AsMap())
+}
+
+// IsMoving queries of a component is in motion.
+func (server *subtypeServer) IsMoving(ctx context.Context, req *pb.IsMovingRequest) (*pb.IsMovingResponse, error) {
+	servo, err := server.getServo(req.GetName())
+	if err != nil {
+		return nil, err
+	}
+	moving, err := servo.IsMoving(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &pb.IsMovingResponse{IsMoving: moving}, nil
+}
+
+// DoCommand receives arbitrary commands.
+func (server *subtypeServer) DoCommand(ctx context.Context,
+	req *commonpb.DoCommandRequest,
+) (*commonpb.DoCommandResponse, error) {
+	servo, err := server.getServo(req.GetName())
+	if err != nil {
+		return nil, err
+	}
+	return protoutils.DoFromResourceServer(ctx, servo, req)
 }

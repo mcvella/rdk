@@ -9,7 +9,7 @@ import (
 	"go.viam.com/utils/protoutils"
 	"go.viam.com/utils/rpc"
 
-	"go.viam.com/rdk/components/generic"
+	rprotoutils "go.viam.com/rdk/protoutils"
 )
 
 // client implements ServoServiceClient.
@@ -31,19 +31,19 @@ func NewClientFromConn(ctx context.Context, conn rpc.ClientConn, name string, lo
 	}
 }
 
-func (c *client) Move(ctx context.Context, angleDeg uint8, extra map[string]interface{}) error {
+func (c *client) Move(ctx context.Context, angleDeg uint32, extra map[string]interface{}) error {
 	ext, err := protoutils.StructToStructPb(extra)
 	if err != nil {
 		return err
 	}
-	req := &pb.MoveRequest{AngleDeg: uint32(angleDeg), Name: c.name, Extra: ext}
+	req := &pb.MoveRequest{AngleDeg: angleDeg, Name: c.name, Extra: ext}
 	if _, err := c.client.Move(ctx, req); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (c *client) Position(ctx context.Context, extra map[string]interface{}) (uint8, error) {
+func (c *client) Position(ctx context.Context, extra map[string]interface{}) (uint32, error) {
 	ext, err := protoutils.StructToStructPb(extra)
 	if err != nil {
 		return 0, err
@@ -53,7 +53,7 @@ func (c *client) Position(ctx context.Context, extra map[string]interface{}) (ui
 	if err != nil {
 		return 0, err
 	}
-	return uint8(resp.PositionDeg), nil
+	return resp.PositionDeg, nil
 }
 
 func (c *client) Stop(ctx context.Context, extra map[string]interface{}) error {
@@ -66,5 +66,13 @@ func (c *client) Stop(ctx context.Context, extra map[string]interface{}) error {
 }
 
 func (c *client) DoCommand(ctx context.Context, cmd map[string]interface{}) (map[string]interface{}, error) {
-	return generic.DoFromConnection(ctx, c.conn, c.name, cmd)
+	return rprotoutils.DoFromResourceClient(ctx, c.client, c.name, cmd)
+}
+
+func (c *client) IsMoving(ctx context.Context) (bool, error) {
+	resp, err := c.client.IsMoving(ctx, &pb.IsMovingRequest{Name: c.name})
+	if err != nil {
+		return false, err
+	}
+	return resp.IsMoving, nil
 }

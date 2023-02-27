@@ -16,7 +16,7 @@
         {
             "name": "cameraOver",
             "type": "camera",
-            "model": "file",
+            "model": "image_file",
             "attributes": {
                 "color": "artifact_data/vision/chess/board3.png",
                 "depth": "artifact_data/vision/chess/board3.dat.gz",
@@ -44,6 +44,9 @@
            "name": "pieceArm",
             "type": "arm",
             "model": "fake",
+            "attributes": {
+                "model-path": "../../components/arm/fake/fake_model.json"
+            },
             "frame": {
                 "parent": "world",
                 "translation": {

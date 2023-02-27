@@ -3,10 +3,8 @@ package motionplan
 import (
 	"errors"
 	"math"
-	"strconv"
 
 	"github.com/golang/geo/r3"
-	commonpb "go.viam.com/api/common/v1"
 
 	"go.viam.com/rdk/referenceframe"
 	spatial "go.viam.com/rdk/spatialmath"
@@ -43,7 +41,7 @@ func (c *constraintHandler) CheckConstraintPath(ci *ConstraintInput, resolution 
 	if err != nil {
 		return false, nil
 	}
-	steps := GetSteps(ci.StartPos, ci.EndPos, resolution)
+	steps := PathStepCount(ci.StartPos, ci.EndPos, resolution)
 
 	var lastGood []referenceframe.Input
 	// Seed with just the start position to walk the path
@@ -57,7 +55,7 @@ func (c *constraintHandler) CheckConstraintPath(ci *ConstraintInput, resolution 
 		if err != nil {
 			return false, nil
 		}
-		pass, _ := c.CheckConstraints(interpC)
+		pass, _, _ := c.CheckConstraints(interpC)
 		if !pass {
 			if i > 1 {
 				return false, &ConstraintInput{StartInput: lastGood, EndInput: interpC.StartInput}
@@ -71,7 +69,7 @@ func (c *constraintHandler) CheckConstraintPath(ci *ConstraintInput, resolution 
 	if err != nil {
 		return false, nil
 	}
-	pass, _ := c.CheckConstraints(&ConstraintInput{
+	pass, _, _ := c.CheckConstraints(&ConstraintInput{
 		StartPos:   ci.EndPos,
 		EndPos:     ci.EndPos,
 		StartInput: ci.EndInput,
@@ -111,69 +109,109 @@ func (c *constraintHandler) Constraints() []string {
 }
 
 // CheckConstraints will check a given input against all constraints.
-func (c *constraintHandler) CheckConstraints(cInput *ConstraintInput) (bool, float64) {
+// Return values are:
+// -- a bool representing whether all constraints passed
+// -- if passing, a score representing the distance to a non-passing state. Inf(1) if failing.
+// -- if failing, a string naming the failed constraint.
+func (c *constraintHandler) CheckConstraints(cInput *ConstraintInput) (bool, float64, string) {
 	score := 0.
 
-	for _, cFunc := range c.constraints {
+	for name, cFunc := range c.constraints {
 		pass, cScore := cFunc(cInput)
 		if !pass {
-			return false, math.Inf(1)
+			return false, math.Inf(1), name
 		}
 		score += cScore
 	}
-	return true, score
+	return true, score, ""
 }
 
-// NewCollisionConstraint is a helper function for creating a collision Constraint that takes a frame and geometries
-// representing obstacles and interaction spaces and will construct a collision avoidance constraint from them.
-func NewCollisionConstraint(
+// newSelfCollisionConstraint creates a constraint that will be violated if geometries constituting the given frame ever come
+// into collision with themselves outside of the collisions present for the observationInput.
+// Collisions specified as collisionSpecifications will also be ignored
+// if reportDistances is false, this check will be done as fast as possible, if true maximum information will be available for debugging.
+func newSelfCollisionConstraint(
 	frame referenceframe.Frame,
-	goodInput []referenceframe.Input,
-	obstacles, interactionSpaces map[string]spatial.Geometry,
+	observationInput map[string][]referenceframe.Input,
+	collisionSpecifications []*Collision,
 	reportDistances bool,
-) Constraint {
-	zeroVols, err := frame.Geometries(goodInput)
-	if err != nil && len(zeroVols.Geometries()) == 0 {
-		return nil // no geometries defined for frame
-	}
-	internalEntities, err := NewObjectCollisionEntities(zeroVols.Geometries())
+) (Constraint, error) {
+	return newCollisionConstraint(frame, nil, observationInput, collisionSpecifications, reportDistances)
+}
+
+// newObstacleConstraint creates a constraint that will be violated if geometries constituting the given frame ever come
+// into collision with worldState geometries outside of the collisions present for the observationInput.
+// Collisions specified as collisionSpecifications will also be ignored
+// if reportDistances is false, this check will be done as fast as possible, if true maximum information will be available for debugging.
+func newObstacleConstraint(frame referenceframe.Frame,
+	fs referenceframe.FrameSystem,
+	worldState *referenceframe.WorldState,
+	observationInput map[string][]referenceframe.Input,
+	collisionSpecifications []*Collision,
+	reportDistances bool,
+) (Constraint, error) {
+	// TODO(rb) it is bad practice to assume that the current inputs of the robot correspond to the passed in world state
+	// the state that observed the worldState should ultimately be included as part of the worldState message
+	worldState, err := worldState.ToWorldFrame(fs, observationInput)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	obstacleEntities, err := NewObjectCollisionEntities(obstacles)
-	if err != nil {
-		return nil
+	// can use zeroth element of worldState.Obstacles because ToWorldFrame returns only one GeometriesInFrame
+	return newCollisionConstraint(frame, worldState.Obstacles[0].Geometries(), observationInput, collisionSpecifications, reportDistances)
+}
+
+// newCollisionConstraint is the most general method to create a collision constraint, which ill be violated if geometries constituting
+// the given frame ever come into collision with obstacle geometries outside of the collisions present for the observationInput.
+// Collisions specified as collisionSpecifications will also be ignored
+// if reportDistances is false, this check will be done as fast as possible, if true maximum information will be available for debugging.
+func newCollisionConstraint(
+	frame referenceframe.Frame,
+	obstacles map[string]spatial.Geometry,
+	observationInput map[string][]referenceframe.Input,
+	collisionSpecifications []*Collision,
+	reportDistances bool,
+) (Constraint, error) {
+	// extract inputs corresponding to the frame
+	var goodInputs []referenceframe.Input
+	var err error
+	switch f := frame.(type) {
+	case *solverFrame:
+		goodInputs, err = f.mapToSlice(observationInput)
+	default:
+		goodInputs, err = referenceframe.GetFrameInputs(f, observationInput)
 	}
-	spaceEntities, err := NewSpaceCollisionEntities(interactionSpaces)
 	if err != nil {
-		return nil
-	}
-	zeroCG, err := NewCollisionSystem(internalEntities, []CollisionEntities{obstacleEntities, spaceEntities}, true)
-	if err != nil {
-		return nil
+		return nil, err
 	}
 
+	// create robot collision entities
+	zeroVols, err := frame.Geometries(goodInputs)
+	if err != nil && len(zeroVols.Geometries()) == 0 {
+		return nil, err // no geometries defined for frame
+	}
+
+	// create the reference collisionGraph
+	zeroCG, err := newCollisionGraph(zeroVols.Geometries(), obstacles, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	for _, specification := range collisionSpecifications {
+		zeroCG.addCollisionSpecification(specification)
+	}
+
+	// create constraint from reference collision graph
 	constraint := func(cInput *ConstraintInput) (bool, float64) {
 		internal, err := cInput.Frame.Geometries(cInput.StartInput)
 		if err != nil && internal == nil {
 			return false, 0
 		}
-		internalEntities, err := NewObjectCollisionEntities(internal.Geometries())
+
+		cg, err := newCollisionGraph(internal.Geometries(), obstacles, zeroCG, reportDistances)
 		if err != nil {
 			return false, 0
 		}
 
-		cg, err := NewCollisionSystemFromReference(
-			internalEntities,
-			[]CollisionEntities{obstacleEntities, spaceEntities},
-			zeroCG,
-			reportDistances,
-		)
-		if err != nil {
-			return false, 0
-		}
-
-		collisions := cg.Collisions()
+		collisions := cg.collisions()
 		if len(collisions) > 0 {
 			return false, 0
 		}
@@ -186,61 +224,7 @@ func NewCollisionConstraint(
 		}
 		return true, sum
 	}
-	return constraint
-}
-
-// NewCollisionConstraintFromWorldState creates a collision constraint from a world state, framesystem, a model and a set of initial states.
-func NewCollisionConstraintFromWorldState(
-	frame referenceframe.Frame,
-	fs referenceframe.FrameSystem,
-	worldState *commonpb.WorldState,
-	observationInput map[string][]referenceframe.Input,
-	reportDistances bool,
-) (Constraint, error) {
-	transformGeometriesToWorldFrame := func(gfs []*commonpb.GeometriesInFrame) (*referenceframe.GeometriesInFrame, error) {
-		allGeometries := make(map[string]spatial.Geometry)
-		for name1, gf := range gfs {
-			obstacles, err := referenceframe.ProtobufToGeometriesInFrame(gf)
-			if err != nil {
-				return nil, err
-			}
-			// TODO(rb) it is bad practice to assume that the current inputs of the robot correspond to the passed in world state
-			// the state that observed the worldState should ultimately be included as part of the worldState message
-			tf, err := fs.Transform(observationInput, obstacles, referenceframe.World)
-			if err != nil {
-				return nil, err
-			}
-			for name2, g := range tf.(*referenceframe.GeometriesInFrame).Geometries() {
-				geomName := strconv.Itoa(name1) + "_" + name2
-				if _, present := allGeometries[geomName]; present {
-					return nil, errors.New("multiple geometries with the same name")
-				}
-				allGeometries[geomName] = g
-			}
-		}
-		return referenceframe.NewGeometriesInFrame(referenceframe.World, allGeometries), nil
-	}
-	obstacles, err := transformGeometriesToWorldFrame(worldState.GetObstacles())
-	if err != nil {
-		return nil, err
-	}
-	interactionSpaces, err := transformGeometriesToWorldFrame(worldState.GetInteractionSpaces())
-	if err != nil {
-		return nil, err
-	}
-
-	// extract inputs corresponding to the frame
-	var goodInputs []referenceframe.Input
-	switch f := frame.(type) {
-	case *solverFrame:
-		goodInputs, err = f.mapToSlice(observationInput)
-	default:
-		goodInputs, err = referenceframe.GetFrameInputs(f, observationInput)
-	}
-	if err != nil {
-		return nil, err
-	}
-	return NewCollisionConstraint(frame, goodInputs, obstacles.Geometries(), interactionSpaces.Geometries(), reportDistances), nil
+	return constraint, nil
 }
 
 // NewAbsoluteLinearInterpolatingConstraint provides a Constraint whose valid manifold allows a specified amount of deviation from the
@@ -380,31 +364,12 @@ func NewPlaneConstraint(pNorm, pt r3.Vector, writingAngle, epsilon float64) (Con
 // which will bring a pose into the valid constraint space.
 // tolerance refers to the closeness to the line necessary to be a valid pose in mm.
 func NewLineConstraint(pt1, pt2 r3.Vector, tolerance float64) (Constraint, Metric) {
-	// distance from line to point
-	distToLine := func(point r3.Vector) float64 {
-		ab := pt1.Sub(pt2)
-		av := point.Sub(pt2)
-
-		if av.Dot(ab) <= 0.0 { // Point is lagging behind start of the segment, so perpendicular distance is not viable.
-			return av.Norm() // Use distance to start of segment instead.
-		}
-
-		bv := point.Sub(pt1)
-
-		if bv.Dot(ab) >= 0.0 { // Point is advanced past the end of the segment, so perpendicular distance is not viable.
-			return bv.Norm()
-		}
-		dist := (ab.Cross(av)).Norm() / ab.Norm()
-
-		return dist
-	}
-
 	if pt1.Distance(pt2) < defaultEpsilon {
 		tolerance = defaultEpsilon
 	}
 
 	gradFunc := func(from, _ spatial.Pose) float64 {
-		pDist := math.Max(distToLine(from.Point())-tolerance, 0)
+		pDist := math.Max(spatial.DistToLineSegment(pt1, pt2, from.Point())-tolerance, 0)
 		return pDist
 	}
 

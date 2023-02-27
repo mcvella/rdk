@@ -9,6 +9,7 @@ import (
 	commonpb "go.viam.com/api/common/v1"
 	pb "go.viam.com/api/service/navigation/v1"
 
+	"go.viam.com/rdk/protoutils"
 	"go.viam.com/rdk/subtype"
 	"go.viam.com/rdk/utils"
 )
@@ -19,7 +20,7 @@ type subtypeServer struct {
 	subtypeSvc subtype.Service
 }
 
-// NewServer constructs a framesystem gRPC service server.
+// NewServer constructs a navigation gRPC service server.
 func NewServer(s subtype.Service) pb.NavigationServiceServer {
 	return &subtypeServer{subtypeSvc: s}
 }
@@ -151,4 +152,15 @@ func (server *subtypeServer) RemoveWaypoint(ctx context.Context, req *pb.RemoveW
 		return nil, err
 	}
 	return &pb.RemoveWaypointResponse{}, nil
+}
+
+// DoCommand receives arbitrary commands.
+func (server *subtypeServer) DoCommand(ctx context.Context,
+	req *commonpb.DoCommandRequest,
+) (*commonpb.DoCommandResponse, error) {
+	svc, err := server.service(req.Name)
+	if err != nil {
+		return nil, err
+	}
+	return protoutils.DoFromResourceServer(ctx, svc, req)
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 
 	"github.com/pkg/errors"
+	commonpb "go.viam.com/api/common/v1"
 	pb "go.viam.com/api/component/base/v1"
 
 	"go.viam.com/rdk/operation"
@@ -140,4 +141,28 @@ func (s *subtypeServer) Stop(
 		return nil, err
 	}
 	return &pb.StopResponse{}, nil
+}
+
+// IsMoving queries of a component is in motion.
+func (s *subtypeServer) IsMoving(ctx context.Context, req *pb.IsMovingRequest) (*pb.IsMovingResponse, error) {
+	base, err := s.getBase(req.GetName())
+	if err != nil {
+		return nil, err
+	}
+	moving, err := base.IsMoving(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &pb.IsMovingResponse{IsMoving: moving}, nil
+}
+
+// DoCommand receives arbitrary commands.
+func (s *subtypeServer) DoCommand(ctx context.Context,
+	req *commonpb.DoCommandRequest,
+) (*commonpb.DoCommandResponse, error) {
+	base, err := s.getBase(req.GetName())
+	if err != nil {
+		return nil, err
+	}
+	return protoutils.DoFromResourceServer(ctx, base, req)
 }

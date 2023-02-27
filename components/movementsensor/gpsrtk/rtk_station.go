@@ -22,6 +22,7 @@ import (
 	"go.viam.com/rdk/components/movementsensor/gpsnmea"
 	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/registry"
+	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/spatialmath"
 	rdkutils "go.viam.com/rdk/utils"
 )
@@ -43,22 +44,18 @@ type StationConfig struct {
 }
 
 const (
-	i2cStr    = "I2C"
+	i2cStr    = "i2c"
 	serialStr = "serial"
 	ntripStr  = "ntrip"
 	timeMode  = "time"
 )
 
+// ErrStationValidation contains the model substring for the available correction source types.
+var ErrStationValidation = fmt.Errorf("only serial, I2C, and ntrip are supported correction sources for %s", stationModel.Name)
+
 // Validate ensures all parts of the config are valid.
 func (cfg *StationConfig) Validate(path string) ([]string, error) {
 	var deps []string
-	if cfg.CorrectionSource == "" {
-		return nil, utils.NewConfigValidationFieldRequiredError(path, "correction_source")
-	}
-
-	if cfg.CorrectionSource != serialStr && cfg.CorrectionSource != ntripStr && cfg.CorrectionSource != i2cStr {
-		return nil, errors.New("only serial, I2C, and ntrip are supported correction sources")
-	}
 
 	// not ntrip, using serial or i2c for correction source
 	if cfg.SurveyIn == timeMode {
@@ -83,13 +80,15 @@ func (cfg *StationConfig) Validate(path string) ([]string, error) {
 		if cfg.SerialAttrConfig.SerialCorrectionPath == "" {
 			return nil, utils.NewConfigValidationFieldRequiredError(path, "serial_correction_path")
 		}
-	default:
+	case "":
 		return nil, utils.NewConfigValidationFieldRequiredError(path, "correction_source")
+	default:
+		return nil, ErrStationValidation
 	}
 	return deps, nil
 }
 
-const stationModel = "rtk-station"
+var stationModel = resource.NewDefaultModel("rtk-station")
 
 func init() {
 	registry.RegisterComponent(
@@ -104,7 +103,7 @@ func init() {
 			return newRTKStation(ctx, deps, cfg, logger)
 		}})
 
-	config.RegisterComponentAttributeMapConverter(movementsensor.SubtypeName, stationModel,
+	config.RegisterComponentAttributeMapConverter(movementsensor.Subtype, stationModel,
 		func(attributes config.AttributeMap) (interface{}, error) {
 			var attr StationConfig
 			return config.TransformAttributeMapToStruct(&attr, attributes)
@@ -126,8 +125,7 @@ type rtkStation struct {
 	cancelFunc              func()
 	activeBackgroundWorkers sync.WaitGroup
 
-	errMu     sync.Mutex
-	lastError error
+	err movementsensor.LastError
 }
 
 type correctionSource interface {
@@ -238,14 +236,7 @@ func newRTKStation(
 	r.logger.Debug("Starting")
 
 	r.Start(ctx)
-	return r, r.lastError
-}
-
-func (r *rtkStation) setLastError(err error) {
-	r.errMu.Lock()
-	defer r.errMu.Unlock()
-
-	r.lastError = err
+	return r, r.err.Get()
 }
 
 // Start starts reading from the correction source and sends corrections to the child movementsensor's.
@@ -262,7 +253,7 @@ func (r *rtkStation) Start(ctx context.Context) {
 		stream, err := r.correction.Reader()
 		if err != nil {
 			r.logger.Errorf("Unable to get reader: %s", err)
-			r.setLastError(err)
+			r.err.Set(err)
 			return
 		}
 
@@ -289,7 +280,7 @@ func (r *rtkStation) Start(ctx context.Context) {
 					return
 				}
 				r.logger.Errorf("Unable to read stream: %s", err)
-				r.setLastError(err)
+				r.err.Set(err)
 				return
 			}
 
@@ -299,21 +290,21 @@ func (r *rtkStation) Start(ctx context.Context) {
 				handle, err := busAddr.bus.OpenHandle(busAddr.addr)
 				if err != nil {
 					r.logger.Errorf("can't open movementsensor i2c handle: %s", err)
-					r.setLastError(err)
+					r.err.Set(err)
 					return
 				}
 				// write to i2c handle
 				err = handle.Write(ctx, buf)
 				if err != nil {
 					r.logger.Errorf("i2c handle write failed %s", err)
-					r.setLastError(err)
+					r.err.Set(err)
 					return
 				}
 				// close i2c handle
 				err = handle.Close()
 				if err != nil {
 					r.logger.Errorf("failed to close handle: %s", err)
-					r.setLastError(err)
+					r.err.Set(err)
 					return
 				}
 			}
@@ -342,7 +333,7 @@ func (r *rtkStation) Close() error {
 	}
 
 	r.logger.Debug("RTK Station Closed")
-	return r.lastError
+	return r.err.Get()
 }
 
 func (r *rtkStation) Position(ctx context.Context, extra map[string]interface{}) (*geo.Point, float64, error) {
@@ -351,6 +342,10 @@ func (r *rtkStation) Position(ctx context.Context, extra map[string]interface{})
 
 func (r *rtkStation) LinearVelocity(ctx context.Context, extra map[string]interface{}) (r3.Vector, error) {
 	return r3.Vector{}, movementsensor.ErrMethodUnimplementedLinearVelocity
+}
+
+func (r *rtkStation) LinearAcceleration(ctx context.Context, extra map[string]interface{}) (r3.Vector, error) {
+	return r3.Vector{}, movementsensor.ErrMethodUnimplementedLinearAcceleration
 }
 
 func (r *rtkStation) AngularVelocity(ctx context.Context, extra map[string]interface{}) (spatialmath.AngularVelocity, error) {
@@ -374,5 +369,5 @@ func (r *rtkStation) Accuracy(ctx context.Context, extra map[string]interface{})
 }
 
 func (r *rtkStation) Properties(ctx context.Context, extra map[string]interface{}) (*movementsensor.Properties, error) {
-	return &movementsensor.Properties{}, r.lastError
+	return &movementsensor.Properties{}, r.err.Get()
 }

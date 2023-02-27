@@ -1,13 +1,14 @@
 <script setup lang="ts">
 
-import { grpc } from '@improbable-eng/grpc-web';
-import { ref, onMounted } from 'vue';
-import { Client, type ServiceError, baseApi, commonApi } from '@viamrobotics/sdk';
+import { onMounted, onUnmounted } from 'vue';
+import { onClickOutside } from '@vueuse/core';
+import { BaseClient, Client, type ServiceError, commonApi } from '@viamrobotics/sdk';
 import { filterResources } from '../lib/resource';
 import { displayError } from '../lib/error';
 import KeyboardInput, { type Keys } from './keyboard-input.vue';
-import { addStream, removeStream } from '../lib/stream';
+import Camera from './camera/camera.vue';
 import { rcLogConditionally } from '../lib/log';
+import { selectedMap } from '../lib/camera-state';
 
 interface Props {
   name: string;
@@ -15,7 +16,6 @@ interface Props {
   client: Client;
 }
 
-// eslint-disable-next-line no-shadow
 const enum Keymap {
   LEFT = 'a',
   RIGHT = 'd',
@@ -30,87 +30,93 @@ type MovementTypes = 'Continuous' | 'Discrete'
 type MovementModes = 'Straight' | 'Spin'
 type SpinTypes = 'Clockwise' | 'Counterclockwise'
 type Directions = 'Forwards' | 'Backwards'
+type View = 'Stacked' | 'Grid'
 
-interface Emits {
-  (event: 'base-camera-state', value: Map<string, boolean>): void
-}
+const baseClient = new BaseClient(props.client, props.name, { requestLogger: rcLogConditionally });
+const root = $ref<HTMLElement>();
 
-const emit = defineEmits<Emits>();
+const refreshFrequency = $ref('Every Second');
+const triggerRefresh = $ref(false);
 
-const selectedItem = ref<Tabs>('Keyboard');
-const movementMode = ref<MovementModes>('Straight');
-const movementType = ref<MovementTypes>('Continuous');
-const direction = ref<Directions>('Forwards');
-const spinType = ref<SpinTypes>('Clockwise');
-const increment = ref(1000);
+const openCameras = $ref<Record<string, boolean | undefined>>({});
+let selectedView = $ref<View>('Stacked');
+let selectedMode = $ref<Tabs>('Keyboard');
+let movementMode = $ref<MovementModes>('Straight');
+let movementType = $ref<MovementTypes>('Continuous');
+let direction = $ref<Directions>('Forwards');
+let spinType = $ref<SpinTypes>('Clockwise');
+let disableRefresh = $ref(true);
+let disableViews = $ref(true);
+
+const increment = $ref(1000);
 // straight mm/s
-const speed = ref(200);
+const speed = $ref(300);
 // deg/s
-const spinSpeed = ref(90);
-const angle = ref(0);
-
-const videoStreamStates = new Map<string, boolean>();
-const selectCameras = ref('');
+const spinSpeed = $ref(90);
+const angle = $ref(0);
+const power = $ref(50);
 
 const pressed = new Set<Keys>();
 let stopped = true;
 
-const initStreamState = () => {
-  for (const value of filterResources(props.resources, 'rdk', 'component', 'camera')) {
-    videoStreamStates.set(value.name, false);
-  }
-};
+const keyboardStates = $ref({
+  isActive: false,
+});
+
+const resources = $computed(() => filterResources(props.resources, 'rdk', 'component', 'camera'));
 
 const resetDiscreteState = () => {
-  movementMode.value = 'Straight';
-  movementType.value = 'Continuous';
-  direction.value = 'Forwards';
-  spinType.value = 'Clockwise';
+  movementMode = 'Straight';
+  movementType = 'Continuous';
+  direction = 'Forwards';
+  spinType = 'Clockwise';
 };
 
 const setMovementMode = (mode: MovementModes) => {
-  movementMode.value = mode;
+  movementMode = mode;
 };
 
 const setMovementType = (type: MovementTypes) => {
-  movementType.value = type;
+  movementType = type;
 };
 
 const setSpinType = (type: SpinTypes) => {
-  spinType.value = type;
+  spinType = type;
 };
 
 const setDirection = (dir: Directions) => {
-  direction.value = dir;
+  direction = dir;
 };
 
-const stop = () => {
+const stop = async () => {
   stopped = true;
-  const req = new baseApi.StopRequest();
-  req.setName(props.name);
-  props.client.baseService.stop(req, new grpc.Metadata(), displayError);
+  try {
+    await baseClient.stop();
+  } catch (error) {
+    displayError(error as ServiceError);
+  }
 };
 
-const digestInput = () => {
+const digestInput = async () => {
   let linearValue = 0;
   let angularValue = 0;
 
   for (const item of pressed) {
     switch (item) {
       case Keymap.FORWARD: {
-        linearValue += 1;
+        linearValue += Number(0.01 * power);
         break;
       }
       case Keymap.BACKWARD: {
-        linearValue -= 1;
+        linearValue -= Number(0.01 * power);
         break;
       }
       case Keymap.LEFT: {
-        angularValue += 1;
+        angularValue += Number(0.01 * power);
         break;
       }
       case Keymap.RIGHT: {
-        angularValue -= 1;
+        angularValue -= Number(0.01 * power);
         break;
       }
     }
@@ -121,13 +127,15 @@ const digestInput = () => {
   linear.setY(linearValue);
   angular.setZ(angularValue);
 
-  const req = new baseApi.SetPowerRequest();
-  req.setName(props.name);
-  req.setLinear(linear);
-  req.setAngular(angular);
+  try {
+    await baseClient.setPower(linear, angular);
+  } catch (error) {
+    displayError(error as ServiceError);
 
-  rcLogConditionally(req);
-  props.client.baseService.setPower(req, new grpc.Metadata(), displayError);
+    if (pressed.size <= 0) {
+      stop();
+    }
+  }
 };
 
 const handleKeyDown = (key: Keys) => {
@@ -146,7 +154,7 @@ const handleKeyUp = (key: Keys) => {
   }
 };
 
-const handleBaseStraight = (name: string, event: {
+const handleBaseStraight = async (event: {
   distance: number
   speed: number
   direction: number
@@ -154,182 +162,174 @@ const handleBaseStraight = (name: string, event: {
 }) => {
   if (event.movementType === 'Continuous') {
     const linear = new commonApi.Vector3();
+    const angular = new commonApi.Vector3();
     linear.setY(event.speed * event.direction);
 
-    const req = new baseApi.SetVelocityRequest();
-    req.setName(name);
-    req.setLinear(linear);
-    req.setAngular(new commonApi.Vector3());
-
-    rcLogConditionally(req);
-    props.client.baseService.setVelocity(req, new grpc.Metadata(), displayError);
+    try {
+      await baseClient.setVelocity(linear, angular);
+    } catch (error) {
+      displayError(error as ServiceError);
+    }
   } else {
-    const req = new baseApi.MoveStraightRequest();
-    req.setName(name);
-    req.setMmPerSec(event.speed * event.direction);
-    req.setDistanceMm(event.distance);
-
-    rcLogConditionally(req);
-    props.client.baseService.moveStraight(req, new grpc.Metadata(), displayError);
-  }
-};
-
-const baseRun = () => {
-  if (movementMode.value === 'Spin') {
-
-    const req = new baseApi.SpinRequest();
-    req.setName(props.name);
-    req.setAngleDeg(angle.value * (spinType.value === 'Clockwise' ? -1 : 1));
-    req.setDegsPerSec(spinSpeed.value);
-
-    rcLogConditionally(req);
-    props.client.baseService.spin(req, new grpc.Metadata(), displayError);
-
-  } else if (movementMode.value === 'Straight') {
-
-    handleBaseStraight(props.name, {
-      movementType: movementType.value,
-      direction: direction.value === 'Forwards' ? 1 : -1,
-      speed: speed.value,
-      distance: increment.value,
-    });
-
-  }
-};
-
-const viewPreviewCamera = (name: string) => {
-  for (const [key, value] of videoStreamStates) {
-    const streamContainers = document.querySelector(`[data-stream="${key}"]`);
-
-    // Only turn on if state is off
-    if (name.includes(key) && value === false) {
-      try {
-        // Only add stream if other components have not already
-        if (streamContainers?.classList.contains('hidden')) {
-          addStream(props.client, key);
-        }
-        videoStreamStates.set(key, true);
-        emit('base-camera-state', videoStreamStates);
-      } catch (error) {
-        displayError(error as ServiceError);
-      }
-    // Only turn off if state is on
-    } else if (!name.includes(key) && value === true) {
-      try {
-        // Only remove stream if other components are not using the stream
-        if (streamContainers?.classList.contains('hidden')) {
-          removeStream(props.client, key);
-        }
-        videoStreamStates.set(key, false);
-        emit('base-camera-state', videoStreamStates);
-      } catch (error) {
-        displayError(error as ServiceError);
-      }
+    try {
+      await baseClient.moveStraight(event.distance, event.speed * event.direction);
+    } catch (error) {
+      displayError(error as ServiceError);
     }
   }
 };
 
-const handleTabSelect = (tab: Tabs) => {
-  selectedItem.value = tab;
+const baseRun = async () => {
+  if (movementMode === 'Spin') {
+    try {
+      await baseClient.spin(angle * (spinType === 'Clockwise' ? -1 : 1), spinSpeed);
+    } catch (error) {
+      displayError(error as ServiceError);
+    }
+  } else if (movementMode === 'Straight') {
+    handleBaseStraight({
+      movementType,
+      direction: direction === 'Forwards' ? 1 : -1,
+      speed,
+      distance: increment,
+    });
+  }
+};
 
-  /*
-   * deselect options from select cameras select
-   * TODO: handle better with xstate and reactivate on return
-   */
-  selectCameras.value = '';
-  viewPreviewCamera(selectCameras.value);
+const handleViewSelect = (viewMode: View) => {
+  selectedView = viewMode;
 
-  if (tab === 'Discrete') {
+  let liveCameras = 0;
+  for (const camera of resources) {
+    if (openCameras[camera.name]) {
+      liveCameras += 1;
+    }
+  }
+  disableViews = liveCameras > 1;
+
+};
+
+const handleTabSelect = (controlMode: Tabs) => {
+  selectedMode = controlMode;
+
+  if (controlMode === 'Discrete') {
     resetDiscreteState();
   }
 };
 
-onMounted(() => {
-  initStreamState();
+const handleVisibilityChange = () => {
+  if (document.visibilityState === 'hidden') {
+    pressed.clear();
+    stop();
+  }
+};
+
+const handleToggle = () => {
+  if (keyboardStates.isActive) {
+    return;
+  }
+
+  if (pressed.size > 0 || !stopped) {
+    stop();
+  }
+};
+
+const handleUpdateKeyboardState = (on:boolean) => {
+  keyboardStates.isActive = on;
+};
+
+const handleSwitch = (cameraName: string) => {
+  openCameras[cameraName] = !openCameras[cameraName];
+
+  for (const camera of resources) {
+    if (openCameras[camera.name]) {
+      disableRefresh = false;
+      return;
+    }
+  }
+  disableRefresh = true;
+};
+
+onClickOutside($$(root), () => {
+  keyboardStates.isActive = false;
 });
 
+onMounted(() => {
+  window.addEventListener('visibilitychange', handleVisibilityChange);
+
+  for (const camera of resources) {
+    openCameras[camera.name] = false;
+  }
+});
+
+onUnmounted(() => {
+  stop();
+  window.removeEventListener('visibilitychange', handleVisibilityChange);
+});
 </script>
 
 <template>
-  <v-collapse
-    :title="name"
-    class="base"
-  >
-    <v-breadcrumbs
-      slot="title"
-      crumbs="base"
-    />
-
-    <v-button
-      slot="header"
-      variant="danger"
-      icon="stop-circle"
-      label="STOP"
-      @click="stop"
-    />
-
-    <div class="border border-t-0 border-black pt-2">
-      <v-tabs
-        tabs="Keyboard, Discrete"
-        :selected="selectedItem"
-        @input="handleTabSelect($event.detail.value)"
+  <div ref="root">
+    <v-collapse
+      :title="name"
+      class="base"
+    >
+      <v-breadcrumbs
+        slot="title"
+        crumbs="base"
       />
 
-      <div
-        v-if="selectedItem === 'Keyboard'"
-        class="h-auto p-4"
-      >
-        <div class="grid grid-cols-1 sm:grid-cols-2">
-          <KeyboardInput
-            class="mb-2"
-            @keydown="handleKeyDown"
-            @keyup="handleKeyUp"
-            @toggle="(active: boolean) => { !active && (pressed.size > 0 || !stopped) && stop() }"
-          />
-          <div v-if="filterResources(resources, 'rdk', 'component', 'camera')">
-            <v-select
-              v-model="selectCameras"
-              class="mb-4"
-              variant="multiple"
-              placeholder="Select Cameras"
-              aria-label="Select Cameras"
-              :options="
-                filterResources(resources, 'rdk', 'component', 'camera')
-                  .map(({ name }) => name)
-                  .join(',')
-              "
-              @input="viewPreviewCamera($event.detail.value)"
-            />
-            <template
-              v-for="basecamera in filterResources(
-                resources,
-                'rdk',
-                'component',
-                'camera'
-              )"
-              :key="basecamera.name"
-            >
-              <div
-                v-if="basecamera"
-                :data-stream-preview="basecamera.name"
-                :class="{ 'hidden': !videoStreamStates.get(basecamera.name) }"
-              />
-            </template>
-          </div>
-        </div>
-      </div>
-      <div
-        v-if="selectedItem === 'Discrete'"
-        class="flex gap-4 p-4"
-      >
-        <div class="mb-4 grow">
+      <v-button
+        slot="header"
+        variant="danger"
+        icon="stop-circle"
+        label="STOP"
+        @click="stop"
+      />
+
+      <div class="flex flex-wrap sm:flex-nowrap gap-4 border border-t-0 border-black">
+        <div class="flex flex-col gap-4 p-4 min-w-fit">
+          <h2 class="font-bold">
+            Motor Controls
+          </h2>
           <v-radio
-            label="Movement Mode"
-            options="Straight, Spin"
-            :selected="movementMode"
-            @input="setMovementMode($event.detail.value)"
+            label="Control Mode"
+            options="Keyboard, Discrete"
+            :selected="selectedMode"
+            @input="handleTabSelect($event.detail.value)"
           />
-          <div class="flex flex-wrap items-center gap-2 pt-4">
+
+          <div v-if="selectedMode === 'Keyboard'">
+            <KeyboardInput
+              :is-active="keyboardStates.isActive"
+              @keydown="handleKeyDown"
+              @keyup="handleKeyUp"
+              @toggle="handleToggle"
+              @update-keyboard-state="isOn => { handleUpdateKeyboardState(isOn) }"
+            />
+            <v-slider
+              id="power"
+              class="pt-2 w-full max-w-xs"
+              :min="0"
+              :max="100"
+              :step="1"
+              suffix="%"
+              label="Power %"
+              :value="power"
+              @input="power = $event.detail.value"
+            />
+          </div>
+
+          <div
+            v-if="selectedMode === 'Discrete'"
+            class="flex flex-col gap-4"
+          >
+            <v-radio
+              label="Movement Mode"
+              options="Straight, Spin"
+              :selected="movementMode"
+              @input="setMovementMode($event.detail.value)"
+            />
             <v-radio
               v-if="movementMode === 'Straight'"
               label="Movement Type"
@@ -379,7 +379,6 @@ onMounted(() => {
             />
             <div
               v-if="movementMode === 'Spin'"
-              class="w-72 pl-6"
             >
               <v-slider
                 :min="0"
@@ -391,17 +390,87 @@ onMounted(() => {
                 @input="angle = $event.detail.value"
               />
             </div>
+            <v-button
+              icon="play-circle-filled"
+              variant="success"
+              label="RUN"
+              @click="baseRun()"
+            />
+          </div>
+
+          <hr class="my-4 border-t border-gray-400">
+
+          <h2 class="font-bold">
+            Live Feeds
+          </h2>
+
+          <v-radio
+            label="View"
+            options="Stacked, Grid"
+            :selected="selectedView"
+            :disable="disableViews ? 'true' : 'false'"
+            @input="handleViewSelect($event.detail.value)"
+          />
+
+          <div
+            v-if="resources"
+            class="flex flex-col gap-2"
+          >
+            <template
+              v-for="camera in resources"
+              :key="camera.name"
+            >
+              <v-switch
+                :label="camera.name"
+                :aria-label="`Refresh frequency for ${camera.name}`"
+                :value="openCameras[camera.name] ? 'on' : 'off'"
+                @input="handleSwitch(camera.name)"
+              />
+            </template>
+
+            <div class="flex items-end gap-2 mt-2">
+              <v-select
+                v-model="refreshFrequency"
+                label="Refresh frequency"
+                aria-label="Refresh frequency"
+                :options="Object.keys(selectedMap).join(',')"
+                :disabled="disableRefresh ? 'true' : 'false'"
+              />
+
+              <v-button
+                :class="refreshFrequency === 'Live' ? 'invisible' : ''"
+                icon="refresh"
+                label="Refresh"
+                :disabled="disableRefresh ? 'true' : 'false'"
+                @click="triggerRefresh = !triggerRefresh"
+              />
+            </div>
           </div>
         </div>
-        <div class="self-end">
-          <v-button
-            icon="play-circle-filled"
-            variant="success"
-            label="RUN"
-            @click="baseRun()"
-          />
+        <div
+          data-parent="base"
+          class="justify-start gap-4 sm:border-l border-black p-4"
+          :class="selectedView === 'Stacked' ? 'flex flex-col' : 'grid grid-cols-2 gap-4'"
+        >
+          <!-- ******* CAMERAS *******  -->
+          <template
+            v-for="camera in resources"
+            :key="`base ${camera.name}`"
+          >
+            <Camera
+              v-show="openCameras[camera.name]"
+              :camera-name="camera.name"
+              parent-name="base"
+              :client="client"
+              :resources="resources"
+              :show-refresh="true"
+              :show-export-screenshot="false"
+              :refresh-rate="refreshFrequency"
+              :trigger-refresh="triggerRefresh"
+            />
+          </template>
         </div>
       </div>
-    </div>
-  </v-collapse>
+    </v-collapse>
+  </div>
 </template>

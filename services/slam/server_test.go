@@ -9,10 +9,12 @@ import (
 	"testing"
 
 	"github.com/golang/geo/r3"
+	commonpb "go.viam.com/api/common/v1"
 	pb "go.viam.com/api/service/slam/v1"
 	"go.viam.com/test"
 	"go.viam.com/utils/protoutils"
 
+	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/pointcloud"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/resource"
@@ -39,7 +41,7 @@ func TestServer(t *testing.T) {
 	slamServer := slam.NewServer(injectSubtypeSvc)
 
 	t.Run("working get position functions", func(t *testing.T) {
-		pose := spatial.NewPoseFromOrientation(r3.Vector{1, 2, 3}, &spatial.OrientationVector{math.Pi / 2, 0, 0, -1})
+		pose := spatial.NewPose(r3.Vector{X: 1, Y: 2, Z: 3}, &spatial.OrientationVector{Theta: math.Pi / 2, OX: 0, OY: 0, OZ: -1})
 		pSucc := referenceframe.NewPoseInFrame("frame", pose)
 
 		var extraOptions map[string]interface{}
@@ -57,12 +59,12 @@ func TestServer(t *testing.T) {
 		}
 		respPos, err := slamServer.GetPosition(context.Background(), reqPos)
 		test.That(t, err, test.ShouldBeNil)
-		test.That(t, referenceframe.ProtobufToPoseInFrame(respPos.Pose).FrameName(), test.ShouldEqual, pSucc.FrameName())
+		test.That(t, referenceframe.ProtobufToPoseInFrame(respPos.Pose).Parent(), test.ShouldEqual, pSucc.Parent())
 		test.That(t, extraOptions, test.ShouldResemble, extra)
 	})
 
 	t.Run("working get map function", func(t *testing.T) {
-		pose := spatial.NewPoseFromOrientation(r3.Vector{1, 2, 3}, &spatial.OrientationVector{math.Pi / 2, 0, 0, -1})
+		pose := spatial.NewPose(r3.Vector{X: 1, Y: 2, Z: 3}, &spatial.OrientationVector{Theta: math.Pi / 2, OX: 0, OY: 0, OZ: -1})
 		pSucc := referenceframe.NewPoseInFrame("frame", pose)
 		pcSucc := &vision.Object{}
 		pcSucc.PointCloud = pointcloud.New()
@@ -105,6 +107,20 @@ func TestServer(t *testing.T) {
 		test.That(t, extraOptions, test.ShouldResemble, map[string]interface{}{})
 	})
 
+	t.Run("working get internal state functions", func(t *testing.T) {
+		internalStateSucc := []byte{1, 2, 3, 4}
+		injectSvc.GetInternalStateFunc = func(ctx context.Context, name string) ([]byte, error) {
+			return internalStateSucc, nil
+		}
+
+		req := &pb.GetInternalStateRequest{
+			Name: testSlamServiceName,
+		}
+		respInternalState, err := slamServer.GetInternalState(context.Background(), req)
+		test.That(t, err, test.ShouldBeNil)
+		test.That(t, respInternalState.GetInternalState(), test.ShouldResemble, internalStateSucc)
+	})
+
 	t.Run("failing get position function", func(t *testing.T) {
 		injectSvc.PositionFunc = func(ctx context.Context, name string, extra map[string]interface{}) (*referenceframe.PoseInFrame, error) {
 			return nil, errors.New("failure to get position")
@@ -119,7 +135,7 @@ func TestServer(t *testing.T) {
 	})
 
 	t.Run("failing get map function", func(t *testing.T) {
-		pose := spatial.NewPoseFromOrientation(r3.Vector{1, 2, 3}, &spatial.OrientationVector{math.Pi / 2, 0, 0, -1})
+		pose := spatial.NewPose(r3.Vector{X: 1, Y: 2, Z: 3}, &spatial.OrientationVector{Theta: math.Pi / 2, OX: 0, OY: 0, OZ: -1})
 
 		injectSvc.GetMapFunc = func(ctx context.Context, name, mimeType string, cp *referenceframe.PoseInFrame,
 			include bool, extra map[string]interface{},
@@ -133,6 +149,19 @@ func TestServer(t *testing.T) {
 		test.That(t, resp, test.ShouldBeNil)
 	})
 
+	t.Run("failing get internal state function", func(t *testing.T) {
+		injectSvc.GetInternalStateFunc = func(ctx context.Context, name string) ([]byte, error) {
+			return nil, errors.New("failure to get internal state")
+		}
+
+		req := &pb.GetInternalStateRequest{
+			Name: testSlamServiceName,
+		}
+		resp, err := slamServer.GetInternalState(context.Background(), req)
+		test.That(t, err.Error(), test.ShouldContainSubstring, "failure to get internal state")
+		test.That(t, resp, test.ShouldBeNil)
+	})
+
 	resourceMap = map[resource.Name]interface{}{
 		slam.Named(testSlamServiceName): "not a frame system",
 	}
@@ -143,14 +172,19 @@ func TestServer(t *testing.T) {
 		improperImplErr := slam.NewUnimplementedInterfaceError("string")
 
 		getPositionReq := &pb.GetPositionRequest{Name: testSlamServiceName}
-		getModeResp, err := slamServer.GetPosition(context.Background(), getPositionReq)
-		test.That(t, getModeResp, test.ShouldBeNil)
+		getPositionResp, err := slamServer.GetPosition(context.Background(), getPositionReq)
+		test.That(t, getPositionResp, test.ShouldBeNil)
 		test.That(t, err, test.ShouldBeError, improperImplErr)
 
 		getMapReq := &pb.GetMapRequest{Name: testSlamServiceName}
-		setModeResp, err := slamServer.GetMap(context.Background(), getMapReq)
+		getMapResp, err := slamServer.GetMap(context.Background(), getMapReq)
+		test.That(t, getMapResp, test.ShouldBeNil)
 		test.That(t, err, test.ShouldBeError, improperImplErr)
-		test.That(t, setModeResp, test.ShouldBeNil)
+
+		getInternalStateReq := &pb.GetInternalStateRequest{Name: testSlamServiceName}
+		getInternalStateResp, err := slamServer.GetInternalState(context.Background(), getInternalStateReq)
+		test.That(t, getInternalStateResp, test.ShouldBeNil)
+		test.That(t, err, test.ShouldBeError, improperImplErr)
 	})
 
 	injectSubtypeSvc, _ = subtype.New(map[resource.Name]interface{}{})
@@ -171,7 +205,7 @@ func TestServer(t *testing.T) {
 		injectSubtypeSvc, err := subtype.New(resourceMap)
 		test.That(t, err, test.ShouldBeNil)
 		slamServer = slam.NewServer(injectSubtypeSvc)
-		pose := spatial.NewPoseFromOrientation(r3.Vector{1, 2, 3}, &spatial.OrientationVector{math.Pi / 2, 0, 0, -1})
+		pose := spatial.NewPose(r3.Vector{X: 1, Y: 2, Z: 3}, &spatial.OrientationVector{Theta: math.Pi / 2, OX: 0, OY: 0, OZ: -1})
 		pSucc := referenceframe.NewPoseInFrame("frame", pose)
 		injectSvc.PositionFunc = func(ctx context.Context, name string, extra map[string]interface{}) (*referenceframe.PoseInFrame, error) {
 			return pSucc, nil
@@ -182,12 +216,37 @@ func TestServer(t *testing.T) {
 		}
 		respPos, err := slamServer.GetPosition(context.Background(), reqPos)
 		test.That(t, err, test.ShouldBeNil)
-		test.That(t, referenceframe.ProtobufToPoseInFrame(respPos.Pose).FrameName(), test.ShouldEqual, pSucc.FrameName())
+		test.That(t, referenceframe.ProtobufToPoseInFrame(respPos.Pose).Parent(), test.ShouldEqual, pSucc.Parent())
 		reqPos = &pb.GetPositionRequest{
 			Name: testSlamServiceName2,
 		}
 		respPos, err = slamServer.GetPosition(context.Background(), reqPos)
 		test.That(t, err, test.ShouldBeNil)
-		test.That(t, referenceframe.ProtobufToPoseInFrame(respPos.Pose).FrameName(), test.ShouldEqual, pSucc.FrameName())
+		test.That(t, referenceframe.ProtobufToPoseInFrame(respPos.Pose).Parent(), test.ShouldEqual, pSucc.Parent())
 	})
+}
+
+func TestServerDoCommand(t *testing.T) {
+	resourceMap := map[resource.Name]interface{}{
+		slam.Named(testSvcName1): &inject.SLAMService{
+			DoCommandFunc: generic.EchoFunc,
+		},
+	}
+	injectSubtypeSvc, err := subtype.New(resourceMap)
+	test.That(t, err, test.ShouldBeNil)
+	server := slam.NewServer(injectSubtypeSvc)
+
+	cmd, err := protoutils.StructToStructPb(generic.TestCommand)
+	test.That(t, err, test.ShouldBeNil)
+	doCommandRequest := &commonpb.DoCommandRequest{
+		Name:    testSvcName1,
+		Command: cmd,
+	}
+	doCommandResponse, err := server.DoCommand(context.Background(), doCommandRequest)
+	test.That(t, err, test.ShouldBeNil)
+
+	// Assert that do command response is an echoed request.
+	respMap := doCommandResponse.Result.AsMap()
+	test.That(t, respMap["command"], test.ShouldResemble, "test")
+	test.That(t, respMap["data"], test.ShouldResemble, 500.0)
 }

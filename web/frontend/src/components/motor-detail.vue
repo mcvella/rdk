@@ -1,30 +1,29 @@
-
 <script setup lang="ts">
-
-import { grpc } from '@improbable-eng/grpc-web';
-import { Client, motorApi } from '@viamrobotics/sdk';
+import { onMounted } from 'vue';
+import { Client, motorApi, MotorClient, ServiceError } from '@viamrobotics/sdk';
 import { displayError } from '../lib/error';
 import { rcLogConditionally } from '../lib/log';
 import InfoButton from './info-button.vue';
 
 interface Props {
-  name: string
-  status: motorApi.Status.AsObject
-  client: Client
+  name: string;
+  status: motorApi.Status.AsObject;
+  client: Client;
 }
 
 const props = defineProps<Props>();
 
 type MovementTypes = 'go' | 'goFor' | 'goTo';
-
+const motorClient = new MotorClient(props.client, props.name, { requestLogger: rcLogConditionally });
 const position = $ref(0);
 const rpm = $ref(0);
-const power = $ref(25);
+const power = $ref(50);
 const revolutions = $ref(0);
 
 let movementType = $ref('Go');
 let direction = $ref<-1 | 1>(1);
 let type = $ref<MovementTypes>('go');
+let properties = $ref<motorApi.GetPropertiesResponse.AsObject | undefined>();
 
 const setMovementType = (value: string) => {
   movementType = value;
@@ -60,34 +59,29 @@ const setDirection = (value: string) => {
   }
 };
 
-const setPower = () => {
-  const powerPct = power * direction / 100;
-  const req = new motorApi.SetPowerRequest();
-  req.setName(props.name);
-  req.setPowerPct(powerPct);
-
-  rcLogConditionally(req);
-  props.client.motorService.setPower(req, new grpc.Metadata(), displayError);
+const setPower = async () => {
+  const powerPct = (power * direction) / 100;
+  try {
+    await motorClient.setPower(powerPct);
+  } catch (error) {
+    displayError(error as ServiceError);
+  }
 };
 
-const goFor = () => {
-  const req = new motorApi.GoForRequest();
-  req.setName(props.name);
-  req.setRpm(rpm * direction);
-  req.setRevolutions(revolutions);
-
-  rcLogConditionally(req);
-  props.client.motorService.goFor(req, new grpc.Metadata(), displayError);
+const goFor = async () => {
+  try {
+    await motorClient.goFor(rpm * direction, revolutions);
+  } catch (error) {
+    displayError(error as ServiceError);
+  }
 };
 
-const goTo = () => {
-  const req = new motorApi.GoToRequest();
-  req.setName(props.name);
-  req.setRpm(rpm);
-  req.setPositionRevolutions(position);
-
-  rcLogConditionally(req);
-  props.client.motorService.goTo(req, new grpc.Metadata(), displayError);
+const goTo = async () => {
+  try {
+    await motorClient.goTo(rpm, position);
+  } catch (error) {
+    displayError(error as ServiceError);
+  }
 };
 
 const motorRun = () => {
@@ -102,15 +96,24 @@ const motorRun = () => {
       return goTo();
     }
   }
+  return null;
 };
 
-const motorStop = () => {
-  const req = new motorApi.StopRequest();
-  req.setName(props.name);
-
-  rcLogConditionally(req);
-  props.client.motorService.stop(req, new grpc.Metadata(), displayError);
+const motorStop = async () => {
+  try {
+    await motorClient.motorStop();
+  } catch (error) {
+    displayError(error as ServiceError);
+  }
 };
+
+onMounted(async () => {
+  try {
+    properties = await motorClient.getProperties();
+  } catch (error) {
+    displayError(error as ServiceError);
+  }
+});
 
 </script>
 
@@ -128,7 +131,7 @@ const motorStop = () => {
       class="flex items-center justify-between gap-2"
     >
       <v-badge
-        v-if="status.positionReporting"
+        v-if="properties?.positionReporting"
         :label="`Position ${status.position}`"
       />
       <v-badge
@@ -150,16 +153,10 @@ const motorStop = () => {
     </div>
 
     <div>
-      <div
-        class="border border-t-0 border-black p-4"
-      >
+      <div class="border border-t-0 border-black p-4">
         <v-radio
           label="Set Power"
-          :options="
-            status.positionReporting
-              ? 'Go, Go For, Go To'
-              : 'Go'
-          "
+          :options="properties?.positionReporting ? 'Go, Go For, Go To' : 'Go'"
           :selected="movementType"
           class="mb-4"
           @input="setMovementType($event.detail.value)"
@@ -171,9 +168,7 @@ const motorStop = () => {
           >
             <div class="flex items-center gap-1 place-self-end pr-2">
               <span class="text-lg">{{ movementType }}</span>
-              <InfoButton
-                :info-rows="['Relative to Home']"
-              />
+              <InfoButton :info-rows="['Relative to Home']" />
             </div>
             <v-input
               type="number"
@@ -196,9 +191,7 @@ const motorStop = () => {
           >
             <div class="flex items-center gap-1 place-self-end pr-2">
               <span class="text-lg">{{ movementType }}</span>
-              <InfoButton
-                :info-rows="['Relative to where the robot is currently']"
-              />
+              <InfoButton :info-rows="['Relative to where the robot is currently']" />
             </div>
             <v-input
               type="number"
@@ -227,9 +220,7 @@ const motorStop = () => {
           >
             <div class="flex flex-wrap gap-2">
               <span class="text-lg">{{ movementType }}</span>
-              <InfoButton
-                :info-rows="['Continuously moves']"
-              />
+              <InfoButton :info-rows="['Continuously moves']" />
             </div>
             <v-radio
               label="Direction of Rotation"

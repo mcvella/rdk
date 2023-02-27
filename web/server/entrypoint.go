@@ -5,16 +5,15 @@ import (
 	"context"
 	"net"
 	"os"
+	"path"
+	"path/filepath"
 	"runtime/pprof"
 	"time"
 
 	"github.com/edaniels/golog"
-	"github.com/edaniels/gostream"
-	"github.com/edaniels/gostream/codec/opus"
-	"github.com/edaniels/gostream/codec/x264"
+	"github.com/pkg/errors"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 	"go.viam.com/utils"
 	"go.viam.com/utils/perf"
 	"go.viam.com/utils/rpc"
@@ -25,18 +24,21 @@ import (
 	weboptions "go.viam.com/rdk/robot/web/options"
 )
 
+var viamDotDir = filepath.Join(os.Getenv("HOME"), ".viam")
+
 // Arguments for the command.
 type Arguments struct {
-	AllowInsecureCreds         bool   `flag:"allow-insecure-creds,usage=allow connections to send credentials over plaintext"`
-	ConfigFile                 string `flag:"config,usage=robot config file"`
-	CPUProfile                 string `flag:"cpuprofile,usage=write cpu profile to file"`
-	Debug                      bool   `flag:"debug"`
-	SharedDir                  string `flag:"shareddir,usage=web resource directory"`
-	Version                    bool   `flag:"version,usage=print version"`
-	WebProfile                 bool   `flag:"webprofile,usage=include profiler in http server"`
-	WebRTC                     bool   `flag:"webrtc,usage=force webrtc connections instead of direct"`
-	RevealSensitiveConfigDiffs bool   `flag:"reveal-sensitive-config-diffs,usage=show config diffs"`
-	UntrustedEnv               bool   `flag:"untrusted-env,usage=disable processes and shell from running in a untrusted environment"`
+	AllowInsecureCreds           bool   `flag:"allow-insecure-creds,usage=allow connections to send credentials over plaintext"`
+	ConfigFile                   string `flag:"config,usage=robot config file"`
+	CPUProfile                   string `flag:"cpuprofile,usage=write cpu profile to file"`
+	Debug                        bool   `flag:"debug"`
+	LimitConfigurableDirectories bool   `flag:"limit-configurable-directories,usage=limit which directories users can configure for storing data on-robot"` //nolint:lll
+	SharedDir                    string `flag:"shareddir,usage=web resource directory"`
+	Version                      bool   `flag:"version,usage=print version"`
+	WebProfile                   bool   `flag:"webprofile,usage=include profiler in http server"`
+	WebRTC                       bool   `flag:"webrtc,usage=force webrtc connections instead of direct"`
+	RevealSensitiveConfigDiffs   bool   `flag:"reveal-sensitive-config-diffs,usage=show config diffs"`
+	UntrustedEnv                 bool   `flag:"untrusted-env,usage=disable processes and shell from running in a untrusted environment"`
 }
 
 type robotServer struct {
@@ -58,8 +60,7 @@ func RunServer(ctx context.Context, args []string, _ golog.Logger) (err error) {
 	if argsParsed.Debug {
 		logConfig = golog.NewDebugLoggerConfig()
 	} else {
-		logConfig = golog.NewProductionLoggerConfig()
-		logConfig.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+		logConfig = golog.NewDevelopmentLoggerConfig()
 	}
 	rdkLogLevel := logConfig.Level
 	logger := zap.Must(logConfig.Build()).Sugar().Named("robot_server")
@@ -67,7 +68,18 @@ func RunServer(ctx context.Context, args []string, _ golog.Logger) (err error) {
 
 	// Always log the version, return early if the '-version' flag was provided
 	// fmt.Println would be better but fails linting. Good enough.
-	logger.Infof("Viam RDK Version: %s, Hash: %s", config.Version, config.GitRevision)
+	var versionFields []interface{}
+	if config.Version != "" {
+		versionFields = append(versionFields, "version", config.Version)
+	}
+	if config.GitRevision != "" {
+		versionFields = append(versionFields, "git_rev", config.GitRevision)
+	}
+	if len(versionFields) != 0 {
+		logger.Infow("Viam RDK", versionFields...)
+	} else {
+		logger.Info("Viam RDK built from source; version unknown")
+	}
 	if argsParsed.Version {
 		return
 	}
@@ -145,10 +157,15 @@ func (s *robotServer) runServer(ctx context.Context) error {
 	}
 	cancel()
 
+	slowWatcher, slowWatcherCancel := utils.SlowGoroutineWatcherAfterContext(
+		ctx, 90*time.Second, "server is taking a while to shutdown", s.logger)
+
 	err = s.serveWeb(ctx, cfg)
 	if err != nil {
 		s.logger.Errorw("error serving web", "error", err)
 	}
+	slowWatcherCancel()
+	<-slowWatcher
 
 	return err
 }
@@ -180,11 +197,16 @@ func (s *robotServer) createWebOptions(cfg *config.Config) (weboptions.Options, 
 
 func (s *robotServer) serveWeb(ctx context.Context, cfg *config.Config) (err error) {
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+
+	var cloudRestartCheckerActive chan struct{}
 	rpcDialer := rpc.NewCachedDialer()
 	defer func() {
+		if cloudRestartCheckerActive != nil {
+			<-cloudRestartCheckerActive
+		}
 		err = multierr.Combine(err, rpcDialer.Close())
 	}()
+	defer cancel()
 	ctx = rpc.ContextWithDialer(ctx, rpcDialer)
 
 	processConfig := func(in *config.Config) (*config.Config, error) {
@@ -196,7 +218,9 @@ func (s *robotServer) serveWeb(ctx context.Context, cfg *config.Config) (err err
 		out.Debug = s.args.Debug || cfg.Debug
 		out.FromCommand = true
 		out.AllowInsecureCreds = s.args.AllowInsecureCreds
+		out.LimitConfigurableDirectories = s.args.LimitConfigurableDirectories
 		out.UntrustedEnv = s.args.UntrustedEnv
+		out.PackagePath = path.Join(viamDotDir, "packages")
 		return out, nil
 	}
 
@@ -206,9 +230,14 @@ func (s *robotServer) serveWeb(ctx context.Context, cfg *config.Config) (err err
 	}
 
 	if processedConfig.Cloud != nil {
+		cloudRestartCheckerActive = make(chan struct{})
 		utils.PanicCapturingGo(func() {
+			defer close(cloudRestartCheckerActive)
 			restartCheck, err := newRestartChecker(ctx, cfg.Cloud, s.logger)
 			if err != nil {
+				if errors.Is(err, context.Canceled) {
+					return
+				}
 				s.logger.Panicw("error creating restart checker", "error", err)
 				cancel()
 				return
@@ -237,9 +266,7 @@ func (s *robotServer) serveWeb(ctx context.Context, cfg *config.Config) (err err
 		})
 	}
 
-	var streamConfig gostream.StreamConfig
-	streamConfig.AudioEncoderFactory = opus.NewEncoderFactory()
-	streamConfig.VideoEncoderFactory = x264.NewEncoderFactory()
+	streamConfig := makeStreamConfig()
 
 	robotOptions := []robotimpl.Option{robotimpl.WithWebOptions(web.WithStreamConfig(streamConfig))}
 	if s.args.RevealSensitiveConfigDiffs {
@@ -248,6 +275,7 @@ func (s *robotServer) serveWeb(ctx context.Context, cfg *config.Config) (err err
 
 	myRobot, err := robotimpl.New(ctx, processedConfig, s.logger, robotOptions...)
 	if err != nil {
+		cancel()
 		return err
 	}
 	defer func() {
@@ -257,6 +285,7 @@ func (s *robotServer) serveWeb(ctx context.Context, cfg *config.Config) (err err
 	// watch for and deliver changes to the robot
 	watcher, err := config.NewWatcher(ctx, cfg, s.logger)
 	if err != nil {
+		cancel()
 		return err
 	}
 	defer func() {
@@ -277,29 +306,35 @@ func (s *robotServer) serveWeb(ctx context.Context, cfg *config.Config) (err err
 			case cfg := <-watcher.Config():
 				processedConfig, err := processConfig(cfg)
 				if err != nil {
-					s.logger.Errorw("error processing config", "error", err)
+					s.logger.Errorw("reconfiguration aborted: error processing config", "error", err)
 					continue
 				}
-				myRobot.Reconfigure(ctx, processedConfig)
 
-				// restart web service if necessary
+				// flag to restart web service if necessary
 				diff, err := config.DiffConfigs(*oldCfg, *processedConfig, s.args.RevealSensitiveConfigDiffs)
 				if err != nil {
-					s.logger.Errorw("error diffing config", "error", err)
+					s.logger.Errorw("reconfiguration aborted: error diffing config", "error", err)
 					continue
 				}
-				if !diff.NetworkEqual {
+				var options weboptions.Options
+
+				if !diff.NetworkEqual || !diff.MediaEqual {
 					if err := myRobot.StopWeb(); err != nil {
-						s.logger.Errorw("error stopping web service while reconfiguring", "error", err)
+						s.logger.Errorw("reconfiguration failed: error stopping web service while reconfiguring", "error", err)
 						continue
 					}
-					options, err := s.createWebOptions(processedConfig)
+					options, err = s.createWebOptions(processedConfig)
 					if err != nil {
-						s.logger.Errorw("error creating weboptions", "error", err)
+						s.logger.Errorw("reconfiguration aborted: error creating weboptions", "error", err)
 						continue
 					}
+				}
+
+				myRobot.Reconfigure(ctx, processedConfig)
+
+				if !diff.NetworkEqual || !diff.MediaEqual {
 					if err := myRobot.StartWeb(ctx, options); err != nil {
-						s.logger.Errorw("error starting web service while reconfiguring", "error", err)
+						s.logger.Errorw("reconfiguration failed: error starting web service while reconfiguring", "error", err)
 					}
 				}
 				oldCfg = processedConfig

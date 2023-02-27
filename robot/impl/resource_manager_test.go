@@ -13,7 +13,6 @@ import (
 	"github.com/jhump/protoreflect/desc"
 	"github.com/jhump/protoreflect/grpcreflect"
 	"go.mongodb.org/mongo-driver/bson/primitive"
-	commonpb "go.viam.com/api/common/v1"
 	armpb "go.viam.com/api/component/arm/v1"
 	basepb "go.viam.com/api/component/base/v1"
 	boardpb "go.viam.com/api/component/board/v1"
@@ -46,15 +45,19 @@ import (
 	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/discovery"
 	"go.viam.com/rdk/grpc"
+	"go.viam.com/rdk/module/modmaninterface"
 	"go.viam.com/rdk/operation"
+	"go.viam.com/rdk/pointcloud"
 	"go.viam.com/rdk/referenceframe"
 	"go.viam.com/rdk/registry"
 	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/robot"
 	framesystemparts "go.viam.com/rdk/robot/framesystem/parts"
+	"go.viam.com/rdk/robot/packages"
 	"go.viam.com/rdk/services/motion"
 	"go.viam.com/rdk/services/shell"
 	"go.viam.com/rdk/services/vision"
+	"go.viam.com/rdk/session"
 	rdktestutils "go.viam.com/rdk/testutils"
 	"go.viam.com/rdk/testutils/inject"
 	"go.viam.com/rdk/testutils/robottestutils"
@@ -492,7 +495,7 @@ func TestManagerAdd(t *testing.T) {
 		ctx context.Context,
 		componentName resource.Name,
 		grabPose *referenceframe.PoseInFrame,
-		worldState *commonpb.WorldState,
+		worldState *referenceframe.WorldState,
 		extra map[string]interface{},
 	) (bool, error) {
 		return false, nil
@@ -511,7 +514,7 @@ func TestManagerAdd(t *testing.T) {
 	) ([]*viz.Object, error) {
 		return []*viz.Object{viz.NewEmptyObject()}, nil
 	}
-	objectSegResName := vision.Named(resource.DefaultModelName)
+	objectSegResName := vision.Named(resource.DefaultServiceName)
 	manager.addResource(objectSegResName, injectVisionService)
 	objectSegmentationService, err := manager.ResourceByName(objectSegResName)
 	test.That(t, err, test.ShouldBeNil)
@@ -519,53 +522,54 @@ func TestManagerAdd(t *testing.T) {
 }
 
 func TestManagerNewComponent(t *testing.T) {
+	fakeModel := resource.NewDefaultModel("fake")
 	cfg := &config.Config{
 		Components: []config.Component{
 			{
 				Name:      "arm1",
-				Model:     "fake",
+				Model:     fakeModel,
 				Namespace: resource.ResourceNamespaceRDK,
 				Type:      arm.SubtypeName,
 				DependsOn: []string{"board1"},
 			},
 			{
 				Name:      "arm2",
-				Model:     "fake",
+				Model:     fakeModel,
 				Namespace: resource.ResourceNamespaceRDK,
 				Type:      arm.SubtypeName,
 				DependsOn: []string{"board2"},
 			},
 			{
 				Name:      "arm3",
-				Model:     "fake",
+				Model:     fakeModel,
 				Namespace: resource.ResourceNamespaceRDK,
 				Type:      arm.SubtypeName,
 				DependsOn: []string{"board3"},
 			},
 			{
 				Name:      "base1",
-				Model:     "fake",
+				Model:     fakeModel,
 				Namespace: resource.ResourceNamespaceRDK,
 				Type:      base.SubtypeName,
 				DependsOn: []string{"board1"},
 			},
 			{
 				Name:      "base2",
-				Model:     "fake",
+				Model:     fakeModel,
 				Namespace: resource.ResourceNamespaceRDK,
 				Type:      base.SubtypeName,
 				DependsOn: []string{"board2"},
 			},
 			{
 				Name:      "base3",
-				Model:     "fake",
+				Model:     fakeModel,
 				Namespace: resource.ResourceNamespaceRDK,
 				Type:      base.SubtypeName,
 				DependsOn: []string{"board3"},
 			},
 			{
 				Name:                "board1",
-				Model:               "fake",
+				Model:               fakeModel,
 				Namespace:           resource.ResourceNamespaceRDK,
 				Type:                board.SubtypeName,
 				ConvertedAttributes: &fakeboard.Config{},
@@ -573,7 +577,7 @@ func TestManagerNewComponent(t *testing.T) {
 			},
 			{
 				Name:                "board2",
-				Model:               "fake",
+				Model:               fakeModel,
 				Namespace:           resource.ResourceNamespaceRDK,
 				Type:                board.SubtypeName,
 				ConvertedAttributes: &fakeboard.Config{},
@@ -581,7 +585,7 @@ func TestManagerNewComponent(t *testing.T) {
 			},
 			{
 				Name:                "board3",
-				Model:               "fake",
+				Model:               fakeModel,
 				Namespace:           resource.ResourceNamespaceRDK,
 				Type:                board.SubtypeName,
 				ConvertedAttributes: &fakeboard.Config{},
@@ -589,49 +593,49 @@ func TestManagerNewComponent(t *testing.T) {
 			},
 			{
 				Name:      "camera1",
-				Model:     "fake",
+				Model:     fakeModel,
 				Namespace: resource.ResourceNamespaceRDK,
 				Type:      camera.SubtypeName,
 				DependsOn: []string{"board1"},
 			},
 			{
 				Name:      "camera2",
-				Model:     "fake",
+				Model:     fakeModel,
 				Namespace: resource.ResourceNamespaceRDK,
 				Type:      camera.SubtypeName,
 				DependsOn: []string{"board2"},
 			},
 			{
 				Name:      "camera3",
-				Model:     "fake",
+				Model:     fakeModel,
 				Namespace: resource.ResourceNamespaceRDK,
 				Type:      camera.SubtypeName,
 				DependsOn: []string{"board3"},
 			},
 			{
 				Name:      "gripper1",
-				Model:     "fake",
+				Model:     fakeModel,
 				Namespace: resource.ResourceNamespaceRDK,
 				Type:      gripper.SubtypeName,
 				DependsOn: []string{"arm1", "camera1"},
 			},
 			{
 				Name:      "gripper2",
-				Model:     "fake",
+				Model:     fakeModel,
 				Namespace: resource.ResourceNamespaceRDK,
 				Type:      gripper.SubtypeName,
 				DependsOn: []string{"arm2", "camera2"},
 			},
 			{
 				Name:      "gripper3",
-				Model:     "fake",
+				Model:     fakeModel,
 				Namespace: resource.ResourceNamespaceRDK,
 				Type:      gripper.SubtypeName,
 				DependsOn: []string{"arm3", "camera3"},
 			},
 			{
 				Name:                "inputController1",
-				Model:               "fake",
+				Model:               fakeModel,
 				Namespace:           resource.ResourceNamespaceRDK,
 				Type:                input.SubtypeName,
 				ConvertedAttributes: &fakeinput.Config{},
@@ -639,7 +643,7 @@ func TestManagerNewComponent(t *testing.T) {
 			},
 			{
 				Name:                "inputController2",
-				Model:               "fake",
+				Model:               fakeModel,
 				Namespace:           resource.ResourceNamespaceRDK,
 				Type:                input.SubtypeName,
 				ConvertedAttributes: &fakeinput.Config{},
@@ -647,7 +651,7 @@ func TestManagerNewComponent(t *testing.T) {
 			},
 			{
 				Name:                "inputController3",
-				Model:               "fake",
+				Model:               fakeModel,
 				Namespace:           resource.ResourceNamespaceRDK,
 				Type:                input.SubtypeName,
 				ConvertedAttributes: &fakeinput.Config{},
@@ -655,7 +659,7 @@ func TestManagerNewComponent(t *testing.T) {
 			},
 			{
 				Name:                "motor1",
-				Model:               "fake",
+				Model:               fakeModel,
 				Namespace:           resource.ResourceNamespaceRDK,
 				Type:                motor.SubtypeName,
 				ConvertedAttributes: &fakemotor.Config{},
@@ -663,7 +667,7 @@ func TestManagerNewComponent(t *testing.T) {
 			},
 			{
 				Name:                "motor2",
-				Model:               "fake",
+				Model:               fakeModel,
 				Namespace:           resource.ResourceNamespaceRDK,
 				Type:                motor.SubtypeName,
 				ConvertedAttributes: &fakemotor.Config{},
@@ -671,7 +675,7 @@ func TestManagerNewComponent(t *testing.T) {
 			},
 			{
 				Name:                "motor3",
-				Model:               "fake",
+				Model:               fakeModel,
 				Namespace:           resource.ResourceNamespaceRDK,
 				Type:                motor.SubtypeName,
 				ConvertedAttributes: &fakemotor.Config{},
@@ -679,42 +683,42 @@ func TestManagerNewComponent(t *testing.T) {
 			},
 			{
 				Name:      "sensor1",
-				Model:     "fake",
+				Model:     fakeModel,
 				Namespace: resource.ResourceNamespaceRDK,
 				Type:      sensor.SubtypeName,
 				DependsOn: []string{"board1"},
 			},
 			{
 				Name:      "sensor2",
-				Model:     "fake",
+				Model:     fakeModel,
 				Namespace: resource.ResourceNamespaceRDK,
 				Type:      sensor.SubtypeName,
 				DependsOn: []string{"board2"},
 			},
 			{
 				Name:      "sensor3",
-				Model:     "fake",
+				Model:     fakeModel,
 				Namespace: resource.ResourceNamespaceRDK,
 				Type:      sensor.SubtypeName,
 				DependsOn: []string{"board3"},
 			},
 			{
 				Name:      "servo1",
-				Model:     "fake",
+				Model:     fakeModel,
 				Namespace: resource.ResourceNamespaceRDK,
 				Type:      servo.SubtypeName,
 				DependsOn: []string{"board1"},
 			},
 			{
 				Name:      "servo2",
-				Model:     "fake",
+				Model:     fakeModel,
 				Namespace: resource.ResourceNamespaceRDK,
 				Type:      servo.SubtypeName,
 				DependsOn: []string{"board2"},
 			},
 			{
 				Name:      "servo3",
-				Model:     "fake",
+				Model:     fakeModel,
 				Namespace: resource.ResourceNamespaceRDK,
 				Type:      servo.SubtypeName,
 				DependsOn: []string{"board3"},
@@ -748,7 +752,7 @@ func TestManagerNewComponent(t *testing.T) {
 
 	diff.Modified.Components = append(diff.Modified.Components, config.Component{
 		Name:                "board3",
-		Model:               "fake",
+		Model:               fakeModel,
 		Namespace:           resource.ResourceNamespaceRDK,
 		Type:                board.SubtypeName,
 		ConvertedAttributes: &fakeboard.Config{},
@@ -874,7 +878,7 @@ func TestManagerFilterFromConfig(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 	checkEmpty(filtered)
 
-	test.That(t, manager.Close(ctx), test.ShouldBeNil)
+	test.That(t, manager.Close(ctx, &localRobot{}), test.ShouldBeNil)
 	cancel()
 
 	ctx, cancel = context.WithCancel(context.Background())
@@ -971,7 +975,7 @@ func TestManagerFilterFromConfig(t *testing.T) {
 		utils.NewStringSet("2"),
 	)
 
-	test.That(t, manager.Close(ctx), test.ShouldBeNil)
+	test.That(t, manager.Close(ctx, &localRobot{}), test.ShouldBeNil)
 	cancel()
 
 	ctx, cancel = context.WithCancel(context.Background())
@@ -1105,7 +1109,7 @@ func TestManagerFilterFromConfig(t *testing.T) {
 		utils.NewStringSet("2"),
 	)
 
-	test.That(t, manager.Close(ctx), test.ShouldBeNil)
+	test.That(t, manager.Close(ctx, &localRobot{}), test.ShouldBeNil)
 	cancel()
 
 	ctx, cancel = context.WithCancel(context.Background())
@@ -1322,7 +1326,7 @@ func TestManagerFilterFromConfig(t *testing.T) {
 		test.ShouldResemble,
 		utils.NewStringSet("1", "2"),
 	)
-	test.That(t, manager.Close(ctx), test.ShouldBeNil)
+	test.That(t, manager.Close(ctx, &localRobot{}), test.ShouldBeNil)
 	cancel()
 }
 
@@ -1437,14 +1441,14 @@ func TestConfigUntrustedEnv(t *testing.T) {
 				Services: []config.Service{{
 					Name:      "shell-service",
 					Namespace: shell.Subtype.Namespace,
-					Type:      config.ServiceType(shell.SubtypeName),
+					Type:      shell.SubtypeName,
 				}},
 			},
 			Modified: &config.ModifiedConfigDiff{
 				Services: []config.Service{{
 					Name:      "shell-service",
 					Namespace: shell.Subtype.Namespace,
-					Type:      config.ServiceType(shell.SubtypeName),
+					Type:      shell.SubtypeName,
 				}},
 			},
 		}, func(name string) (resource.Name, bool) {
@@ -1456,7 +1460,7 @@ func TestConfigUntrustedEnv(t *testing.T) {
 			Services: []config.Service{{
 				Name:      "shell-service",
 				Namespace: shell.Subtype.Namespace,
-				Type:      config.ServiceType(shell.SubtypeName),
+				Type:      shell.SubtypeName,
 			}},
 		}, logger)
 		test.That(t, errors.Is(err, errShellServiceDisabled), test.ShouldBeTrue)
@@ -1690,7 +1694,7 @@ func TestUpdateConfig(t *testing.T) {
 		Reconfigurable: WrapWithReconfigurable,
 	})
 
-	registry.RegisterService(Subtype, resource.DefaultModelName, registry.Service{
+	registry.RegisterService(Subtype, resource.DefaultServiceModel, registry.Service{
 		Constructor: func(ctx context.Context, deps registry.Dependencies, c config.Service, logger golog.Logger) (interface{}, error) {
 			return &mock{}, nil
 		},
@@ -1701,7 +1705,7 @@ func TestUpdateConfig(t *testing.T) {
 		test.That(t, utils.TryClose(ctx, manager), test.ShouldBeNil)
 	}()
 
-	svc1 := config.Service{Name: "", Model: resource.DefaultModelName, Namespace: resource.ResourceNamespaceRDK, Type: "testSubType"}
+	svc1 := config.Service{Name: "", Model: resource.DefaultServiceModel, Namespace: resource.ResourceNamespaceRDK, Type: "testSubType"}
 
 	local, ok := r.(*localRobot)
 	test.That(t, ok, test.ShouldBeTrue)
@@ -1719,6 +1723,81 @@ func TestUpdateConfig(t *testing.T) {
 	defer func() {
 		test.That(t, utils.TryClose(ctx, local), test.ShouldBeNil)
 	}()
+}
+
+func TestResourceCreationPanic(t *testing.T) {
+	logger := golog.NewTestLogger(t)
+	ctx := context.Background()
+
+	r, err := New(ctx, &config.Config{}, logger)
+	test.That(t, err, test.ShouldBeNil)
+
+	manager := managerForDummyRobot(r)
+	defer func() {
+		test.That(t, utils.TryClose(ctx, manager), test.ShouldBeNil)
+		test.That(t, utils.TryClose(ctx, r), test.ShouldBeNil)
+	}()
+
+	t.Run("component", func(t *testing.T) {
+		subtypeName := resource.SubtypeName("testComponentSubtype")
+
+		subtype := resource.NewSubtype(
+			resource.ResourceNamespaceRDK,
+			resource.ResourceTypeComponent,
+			subtypeName,
+		)
+		model := resource.NewDefaultModel("test")
+
+		registry.RegisterComponent(subtype, model, registry.Component{
+			Constructor: func(ctx context.Context, deps registry.Dependencies, c config.Component, logger golog.Logger) (interface{}, error) {
+				panic("hello")
+			},
+		})
+
+		svc1 := config.Component{
+			Name:      "test",
+			Model:     model,
+			Namespace: resource.ResourceNamespaceRDK,
+			Type:      subtypeName,
+		}
+
+		local, ok := r.(*localRobot)
+		test.That(t, ok, test.ShouldBeTrue)
+		_, err = manager.processComponent(ctx, svc1.ResourceName(), svc1, nil, local)
+		test.That(t, err.Error(), test.ShouldContainSubstring, "hello")
+	})
+
+	t.Run("service", func(t *testing.T) {
+		subtypeName := resource.SubtypeName("testServiceSubtype")
+
+		subtype := resource.NewSubtype(
+			resource.ResourceNamespaceRDK,
+			resource.ResourceTypeService,
+			subtypeName,
+		)
+
+		registry.RegisterService(subtype, resource.DefaultServiceModel, registry.Service{
+			Constructor: func(ctx context.Context, deps registry.Dependencies, c config.Service, logger golog.Logger) (interface{}, error) {
+				panic("hello")
+			},
+		})
+
+		registry.RegisterResourceSubtype(subtype, registry.ResourceSubtype{
+			Reconfigurable: WrapWithReconfigurable,
+		})
+
+		svc1 := config.Service{
+			Name:      "",
+			Model:     resource.DefaultServiceModel,
+			Namespace: resource.ResourceNamespaceRDK,
+			Type:      subtypeName,
+		}
+
+		local, ok := r.(*localRobot)
+		test.That(t, ok, test.ShouldBeTrue)
+		_, err = manager.processService(ctx, svc1, nil, local)
+		test.That(t, err.Error(), test.ShouldContainSubstring, "hello")
+	})
 }
 
 var _ = resource.Reconfigurable(&mock{})
@@ -1747,9 +1826,10 @@ func (m *mock) Reconfigure(ctx context.Context, newSvc resource.Reconfigurable) 
 
 // A dummyRobot implements wraps an robot.Robot. It's only use for testing purposes.
 type dummyRobot struct {
-	mu      sync.Mutex
-	robot   robot.Robot
-	manager *resourceManager
+	mu         sync.Mutex
+	robot      robot.Robot
+	manager    *resourceManager
+	modmanager modmaninterface.ModuleManager
 }
 
 // newDummyRobot returns a new dummy robot wrapping a given robot.Robot
@@ -1799,7 +1879,7 @@ func (rr *dummyRobot) ResourceByName(name resource.Name) (interface{}, error) {
 // FrameSystemConfig returns a remote robot's FrameSystem Config.
 func (rr *dummyRobot) FrameSystemConfig(
 	ctx context.Context,
-	additionalTransforms []*commonpb.Transform,
+	additionalTransforms []*referenceframe.LinkInFrame,
 ) (framesystemparts.Parts, error) {
 	panic("change to return nil")
 }
@@ -1808,8 +1888,13 @@ func (rr *dummyRobot) TransformPose(
 	ctx context.Context,
 	pose *referenceframe.PoseInFrame,
 	dst string,
-	additionalTransforms []*commonpb.Transform,
+	additionalTransforms []*referenceframe.LinkInFrame,
 ) (*referenceframe.PoseInFrame, error) {
+	panic("change to return nil")
+}
+
+func (rr *dummyRobot) TransformPointCloud(ctx context.Context, srcpc pointcloud.PointCloud, srcName, dstName string,
+) (pointcloud.PointCloud, error) {
 	panic("change to return nil")
 }
 
@@ -1822,6 +1907,18 @@ func (rr *dummyRobot) ProcessManager() pexec.ProcessManager {
 }
 
 func (rr *dummyRobot) OperationManager() *operation.Manager {
+	panic("change to return nil")
+}
+
+func (rr *dummyRobot) ModuleManager() modmaninterface.ModuleManager {
+	return rr.modmanager
+}
+
+func (rr *dummyRobot) SessionManager() session.Manager {
+	panic("change to return nil")
+}
+
+func (rr *dummyRobot) PackageManager() packages.Manager {
 	panic("change to return nil")
 }
 

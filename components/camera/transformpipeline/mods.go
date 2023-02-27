@@ -21,22 +21,24 @@ import (
 // rotateSource is the source to be rotated and the kind of image type.
 type rotateSource struct {
 	originalStream gostream.VideoStream
-	stream         camera.StreamType
+	stream         camera.ImageType
 }
 
 // newRotateTransform creates a new rotation transform.
-func newRotateTransform(ctx context.Context, source gostream.VideoSource, stream camera.StreamType,
-) (gostream.VideoSource, camera.StreamType, error) {
-	var cameraModel *transform.PinholeCameraModel
-	if cameraSrc, ok := source.(camera.Camera); ok {
-		props, err := cameraSrc.Properties(ctx)
-		if err != nil {
-			return nil, camera.UnspecifiedStream, err
-		}
-		cameraModel = &transform.PinholeCameraModel{props.IntrinsicParams, props.DistortionParams}
+func newRotateTransform(ctx context.Context, source gostream.VideoSource, stream camera.ImageType,
+) (gostream.VideoSource, camera.ImageType, error) {
+	props, err := propsFromVideoSource(ctx, source)
+	if err != nil {
+		return nil, camera.UnspecifiedStream, err
+	}
+	var cameraModel transform.PinholeCameraModel
+	cameraModel.PinholeCameraIntrinsics = props.IntrinsicParams
+
+	if props.DistortionParams != nil {
+		cameraModel.Distortion = props.DistortionParams
 	}
 	reader := &rotateSource{gostream.NewEmbeddedVideoStream(source), stream}
-	cam, err := camera.NewFromReader(ctx, reader, cameraModel, stream)
+	cam, err := camera.NewFromReader(ctx, reader, &cameraModel, stream)
 	return cam, stream, err
 }
 
@@ -58,7 +60,7 @@ func (rs *rotateSource) Read(ctx context.Context) (image.Image, func(), error) {
 		}
 		return dm.Rotate(180), release, nil
 	default:
-		return nil, nil, camera.NewUnsupportedStreamError(rs.stream)
+		return nil, nil, camera.NewUnsupportedImageTypeError(rs.stream)
 	}
 }
 
@@ -75,15 +77,15 @@ type resizeAttrs struct {
 
 type resizeSource struct {
 	originalStream gostream.VideoStream
-	stream         camera.StreamType
+	stream         camera.ImageType
 	height         int
 	width          int
 }
 
 // newResizeTransform creates a new resize transform.
 func newResizeTransform(
-	ctx context.Context, source gostream.VideoSource, stream camera.StreamType, am config.AttributeMap,
-) (gostream.VideoSource, camera.StreamType, error) {
+	ctx context.Context, source gostream.VideoSource, stream camera.ImageType, am config.AttributeMap,
+) (gostream.VideoSource, camera.ImageType, error) {
 	conf, err := config.TransformAttributeMapToStruct(&(resizeAttrs{}), am)
 	if err != nil {
 		return nil, camera.UnspecifiedStream, err
@@ -126,7 +128,7 @@ func (rs *resizeSource) Read(ctx context.Context) (image.Image, func(), error) {
 		draw.NearestNeighbor.Scale(dst, dst.Bounds(), dm, dm.Bounds(), draw.Over, nil)
 		return dst, release, nil
 	default:
-		return nil, nil, camera.NewUnsupportedStreamError(rs.stream)
+		return nil, nil, camera.NewUnsupportedImageTypeError(rs.stream)
 	}
 }
 

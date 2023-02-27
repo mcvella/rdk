@@ -38,7 +38,7 @@ func init() {
 		},
 	})
 	data.RegisterCollector(data.MethodMetadata{
-		Subtype:    SubtypeName,
+		Subtype:    Subtype,
 		MethodName: position.String(),
 	}, newPositionCollector)
 }
@@ -57,22 +57,21 @@ var Subtype = resource.NewSubtype(
 type Servo interface {
 	// Move moves the servo to the given angle (0-180 degrees)
 	// This will block until done or a new operation cancels this one
-	Move(ctx context.Context, angleDeg uint8, extra map[string]interface{}) error
+	Move(ctx context.Context, angleDeg uint32, extra map[string]interface{}) error
 
 	// Position returns the current set angle (degrees) of the servo.
-	Position(ctx context.Context, extra map[string]interface{}) (uint8, error)
+	Position(ctx context.Context, extra map[string]interface{}) (uint32, error)
 
 	// Stop stops the servo. It is assumed the servo stops immediately.
 	Stop(ctx context.Context, extra map[string]interface{}) error
 
 	generic.Generic
+	resource.MovingCheckable
 }
 
 // A LocalServo represents a Servo that can report whether it is moving or not.
 type LocalServo interface {
 	Servo
-
-	resource.MovingCheckable
 }
 
 // Named is a helper for getting the named Servo's typed resource name.
@@ -89,25 +88,17 @@ var (
 
 // NewUnimplementedInterfaceError is used when there is a failed interface check.
 func NewUnimplementedInterfaceError(actual interface{}) error {
-	return utils.NewUnimplementedInterfaceError((Servo)(nil), actual)
+	return utils.NewUnimplementedInterfaceError((*Servo)(nil), actual)
 }
 
 // NewUnimplementedLocalInterfaceError is used when there is a failed interface check.
 func NewUnimplementedLocalInterfaceError(actual interface{}) error {
-	return utils.NewUnimplementedInterfaceError((LocalServo)(nil), actual)
+	return utils.NewUnimplementedInterfaceError((*LocalServo)(nil), actual)
 }
 
 // FromRobot is a helper for getting the named servo from the given Robot.
 func FromRobot(r robot.Robot, name string) (Servo, error) {
-	res, err := r.ResourceByName(Named(name))
-	if err != nil {
-		return nil, err
-	}
-	part, ok := res.(Servo)
-	if !ok {
-		return nil, NewUnimplementedInterfaceError(res)
-	}
-	return part, nil
+	return robot.ResourceFromRobot[Servo](r, Named(name))
 }
 
 // NamesFromRobot is a helper for getting all servo names from the given Robot.
@@ -117,7 +108,7 @@ func NamesFromRobot(r robot.Robot) []string {
 
 // CreateStatus creates a status from the servo.
 func CreateStatus(ctx context.Context, resource interface{}) (*pb.Status, error) {
-	servo, ok := resource.(LocalServo)
+	servo, ok := resource.(Servo)
 	if !ok {
 		return nil, NewUnimplementedLocalInterfaceError(resource)
 	}
@@ -129,7 +120,7 @@ func CreateStatus(ctx context.Context, resource interface{}) (*pb.Status, error)
 	if err != nil {
 		return nil, err
 	}
-	return &pb.Status{PositionDeg: uint32(position), IsMoving: isMoving}, nil
+	return &pb.Status{PositionDeg: position, IsMoving: isMoving}, nil
 }
 
 type reconfigurableServo struct {
@@ -155,13 +146,13 @@ func (r *reconfigurableServo) DoCommand(ctx context.Context, cmd map[string]inte
 	return r.actual.DoCommand(ctx, cmd)
 }
 
-func (r *reconfigurableServo) Move(ctx context.Context, angleDeg uint8, extra map[string]interface{}) error {
+func (r *reconfigurableServo) Move(ctx context.Context, angleDeg uint32, extra map[string]interface{}) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.actual.Move(ctx, angleDeg, extra)
 }
 
-func (r *reconfigurableServo) Position(ctx context.Context, extra map[string]interface{}) (uint8, error) {
+func (r *reconfigurableServo) Position(ctx context.Context, extra map[string]interface{}) (uint32, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.actual.Position(ctx, extra)
@@ -177,6 +168,12 @@ func (r *reconfigurableServo) Close(ctx context.Context) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return viamutils.TryClose(ctx, r.actual)
+}
+
+func (r *reconfigurableServo) IsMoving(ctx context.Context) (bool, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.actual.IsMoving(ctx)
 }
 
 func (r *reconfigurableServo) Reconfigure(ctx context.Context, newServo resource.Reconfigurable) error {

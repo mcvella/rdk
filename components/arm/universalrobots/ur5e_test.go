@@ -1,44 +1,34 @@
 package universalrobots
 
 import (
+	"bufio"
 	"context"
+	"errors"
+	"fmt"
 	"math"
-	"math/rand"
+	"net"
+	"os"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/edaniels/golog"
 	"github.com/go-gl/mathgl/mgl64"
 	"github.com/golang/geo/r3"
-	commonpb "go.viam.com/api/common/v1"
 	"go.viam.com/test"
+	goutils "go.viam.com/utils"
 	"gonum.org/v1/gonum/mat"
 	"gonum.org/v1/gonum/num/quat"
 
+	"go.viam.com/rdk/components/arm"
+	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/motionplan"
 	"go.viam.com/rdk/referenceframe"
+	"go.viam.com/rdk/resource"
 	"go.viam.com/rdk/spatialmath"
+	"go.viam.com/rdk/testutils/inject"
 	"go.viam.com/rdk/utils"
 )
-
-func TestUR5eForwardKinematicsSVAvsDH(t *testing.T) {
-	numTests := 10000
-
-	mSVA, err := referenceframe.UnmarshalModelJSON(ur5modeljson, "")
-	test.That(t, err, test.ShouldBeNil)
-	mDH, err := referenceframe.UnmarshalModelJSON(ur5DHmodeljson, "")
-	test.That(t, err, test.ShouldBeNil)
-
-	seed := rand.New(rand.NewSource(23))
-	for i := 0; i < numTests; i++ {
-		joints := referenceframe.JointPositionsFromRadians(referenceframe.GenerateRandomConfiguration(mSVA, seed))
-
-		posSVA, err := motionplan.ComputePosition(mSVA, joints)
-		test.That(t, err, test.ShouldBeNil)
-		posDH, err := motionplan.ComputePosition(mDH, joints)
-		test.That(t, err, test.ShouldBeNil)
-		test.That(t, spatialmath.PoseAlmostEqual(posSVA, posDH), test.ShouldBeTrue)
-	}
-}
 
 func testUR5eForwardKinematics(t *testing.T, jointRadians []float64, correct r3.Vector) {
 	t.Helper()
@@ -127,21 +117,22 @@ func TestKin1(t *testing.T) {
 		r3.Vector{X: 97.11, Y: -203.73, Z: -394.65},
 	)
 
-	testUR5eInverseKinematics(t, spatialmath.NewPoseFromOrientation(
+	testUR5eInverseKinematics(t, spatialmath.NewPose(
 		r3.Vector{X: -202.31, Y: -577.75, Z: 318.58},
 		&spatialmath.OrientationVectorDegrees{Theta: 51.84, OX: 0.47, OY: -.42, OZ: -.78},
 	))
 }
 
 func TestUseURHostedKinematics(t *testing.T) {
-	gifs := []*commonpb.GeometriesInFrame{{Geometries: []*commonpb.Geometry{{
-		Center:       spatialmath.PoseToProtobuf(spatialmath.NewZeroPose()),
-		GeometryType: &commonpb.Geometry_Sphere{Sphere: &commonpb.Sphere{RadiusMm: 1}},
-	}}}}
+	sphere, err := spatialmath.NewSphere(spatialmath.NewZeroPose(), 1, "")
+	test.That(t, err, test.ShouldBeNil)
+	obstacles := make(map[string]spatialmath.Geometry)
+	obstacles["sphere"] = sphere
+	gifs := []*referenceframe.GeometriesInFrame{referenceframe.NewGeometriesInFrame(referenceframe.World, obstacles)}
 
 	// test that under normal circumstances we can use worldstate and our own kinematics
 	ur := URArm{}
-	using, err := ur.useURHostedKinematics(&commonpb.WorldState{Obstacles: gifs}, nil)
+	using, err := ur.useURHostedKinematics(&referenceframe.WorldState{Obstacles: gifs}, nil)
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, using, test.ShouldBeFalse)
 
@@ -154,23 +145,18 @@ func TestUseURHostedKinematics(t *testing.T) {
 
 	// test specifying at config time with no obstacles or extra params at runtime
 	ur.urHostedKinematics = true
-	using, err = ur.useURHostedKinematics(&commonpb.WorldState{}, nil)
+	using, err = ur.useURHostedKinematics(&referenceframe.WorldState{}, nil)
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, using, test.ShouldBeTrue)
 
 	// test that we can override the config preference with extra params
 	extraParams["arm_hosted_kinematics"] = false
-	using, err = ur.useURHostedKinematics(&commonpb.WorldState{Obstacles: gifs}, extraParams)
+	using, err = ur.useURHostedKinematics(&referenceframe.WorldState{Obstacles: gifs}, extraParams)
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, using, test.ShouldBeFalse)
 
 	// test obstacles will cause this to error
-	_, err = ur.useURHostedKinematics(&commonpb.WorldState{Obstacles: gifs}, nil)
-	test.That(t, err, test.ShouldNotBeNil)
-	test.That(t, err.Error(), test.ShouldResemble, errURHostedKinematics)
-
-	// test obstacles will cause this to error
-	_, err = ur.useURHostedKinematics(&commonpb.WorldState{InteractionSpaces: gifs}, nil)
+	_, err = ur.useURHostedKinematics(&referenceframe.WorldState{Obstacles: gifs}, nil)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err.Error(), test.ShouldResemble, errURHostedKinematics)
 }
@@ -252,8 +238,255 @@ func computeUR5ePosition(t *testing.T, jointRadians []float64) spatialmath.Pose 
 	test.That(t, poseOV.OY, test.ShouldAlmostEqual, ov.OY, .01)
 	test.That(t, poseOV.OZ, test.ShouldAlmostEqual, ov.OZ, .01)
 
-	return spatialmath.NewPoseFromOrientation(
+	return spatialmath.NewPose(
 		r3.Vector{X: res.At(0, 3), Y: res.At(1, 3), Z: res.At(2, 3)}.Mul(1000),
 		&spatialmath.OrientationVectorDegrees{OX: poseOV.OX, OY: poseOV.OY, OZ: poseOV.OZ, Theta: utils.RadToDeg(poseOV.Theta)},
 	)
+}
+
+func selectChanOrTimeout(c <-chan struct{}, timeout time.Duration) error {
+	timer := time.NewTimer(timeout)
+	select {
+	case <-timer.C:
+		return errors.New("timeout")
+	case <-c:
+		return nil
+	}
+}
+
+func setupListeners(ctx context.Context, statusBlob []byte,
+	remote *atomic.Bool,
+) (func(), chan struct{}, chan struct{}, error) {
+	listener29999, err := net.Listen("tcp", "localhost:29999")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	listener30001, err := net.Listen("tcp", "localhost:30001")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	listener30011, err := net.Listen("tcp", "localhost:30011")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	dashboardChan := make(chan struct{})
+	remoteConnChan := make(chan struct{})
+
+	goutils.PanicCapturingGo(func() {
+		for {
+			if ctx.Err() != nil {
+				break
+			}
+			conn, err := listener29999.Accept()
+			if err != nil {
+				break
+			}
+			ioReader := bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn))
+			if _, err = ioReader.WriteString("hello test dashboard\n"); err != nil {
+				break
+			}
+
+			if ioReader.Flush() != nil {
+				break
+			}
+			for {
+				_, _, err := ioReader.ReadLine()
+				if err != nil {
+					return
+				}
+				if _, err = ioReader.WriteString(fmt.Sprintf("%v\n", remote.Load())); err != nil {
+					break
+				}
+				if ioReader.Flush() != nil {
+					break
+				}
+				timeout := time.NewTimer(100 * time.Millisecond)
+				select {
+				case dashboardChan <- struct{}{}:
+					continue
+				case <-ctx.Done():
+					return
+				case <-timeout.C:
+					continue
+				}
+			}
+		}
+	})
+	goutils.PanicCapturingGo(func() {
+		for {
+			if ctx.Err() != nil {
+				break
+			}
+			if _, err := listener30001.Accept(); err != nil {
+				break
+			}
+			remoteConnChan <- struct{}{}
+		}
+	})
+	goutils.PanicCapturingGo(func() {
+		for {
+			if ctx.Err() != nil {
+				break
+			}
+			conn, err := listener30011.Accept()
+			if err != nil {
+				break
+			}
+			for {
+				if ctx.Err() != nil {
+					break
+				}
+				_, err = conn.Write(statusBlob)
+				if err != nil {
+					break
+				}
+				if !goutils.SelectContextOrWait(ctx, 100*time.Millisecond) {
+					return
+				}
+			}
+		}
+	})
+
+	closer := func() {
+		listener30001.Close()
+		listener29999.Close()
+		listener30011.Close()
+	}
+	return closer, dashboardChan, remoteConnChan, nil
+}
+
+func TestArmReconnection(t *testing.T) {
+	var remote atomic.Bool
+
+	remote.Store(false)
+
+	statusBlob, err := os.ReadFile("armBlob")
+	test.That(t, err, test.ShouldBeNil)
+
+	logger := golog.NewTestLogger(t)
+	parentCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx, childCancel := context.WithCancel(parentCtx)
+
+	closer, dashboardChan, remoteConnChan, err := setupListeners(ctx, statusBlob, &remote)
+
+	test.That(t, err, test.ShouldBeNil)
+	cfg := config.Component{
+		Name: "testarm",
+		ConvertedAttributes: &AttrConfig{
+			Speed:               0.3,
+			Host:                "localhost",
+			ArmHostedKinematics: false,
+		},
+	}
+
+	injectRobot := &inject.Robot{}
+	arm, err := URArmConnect(parentCtx, injectRobot, cfg, logger)
+
+	test.That(t, err, test.ShouldBeNil)
+	ua, ok := arm.(*URArm)
+	test.That(t, ok, test.ShouldBeTrue)
+
+	test.That(t, selectChanOrTimeout(dashboardChan, time.Second*5), test.ShouldBeNil)
+	test.That(t, ua.inRemoteMode, test.ShouldBeFalse)
+
+	remote.Store(true)
+
+	test.That(t, selectChanOrTimeout(dashboardChan, time.Second*5), test.ShouldBeNil)
+	test.That(t, selectChanOrTimeout(dashboardChan, time.Second*5), test.ShouldBeNil)
+
+	test.That(t, ua.inRemoteMode, test.ShouldBeTrue)
+	test.That(t, selectChanOrTimeout(remoteConnChan, time.Millisecond*900), test.ShouldBeNil)
+
+	remote.Store(false)
+
+	test.That(t, selectChanOrTimeout(dashboardChan, time.Second*5), test.ShouldBeNil)
+	test.That(t, selectChanOrTimeout(dashboardChan, time.Second*5), test.ShouldBeNil)
+
+	test.That(t, ua.inRemoteMode, test.ShouldBeFalse)
+	test.That(t, selectChanOrTimeout(remoteConnChan, time.Millisecond*900), test.ShouldNotBeNil)
+
+	closer()
+	childCancel()
+
+	test.That(t, goutils.SelectContextOrWait(parentCtx, time.Millisecond*500), test.ShouldBeTrue)
+
+	_ = selectChanOrTimeout(dashboardChan, time.Millisecond*200)
+
+	test.That(t, selectChanOrTimeout(dashboardChan, time.Second*1), test.ShouldNotBeNil)
+	ctx, childCancel = context.WithCancel(parentCtx)
+
+	closer, dashboardChan, remoteConnChan, err = setupListeners(ctx, statusBlob, &remote)
+	test.That(t, err, test.ShouldBeNil)
+	remote.Store(true)
+
+	test.That(t, selectChanOrTimeout(dashboardChan, time.Second*5), test.ShouldBeNil)
+	test.That(t, selectChanOrTimeout(dashboardChan, time.Second*5), test.ShouldBeNil)
+
+	test.That(t, ua.inRemoteMode, test.ShouldBeTrue)
+	test.That(t, selectChanOrTimeout(remoteConnChan, time.Millisecond*900), test.ShouldBeNil)
+
+	closer()
+	childCancel()
+	_ = ua.Close(ctx)
+}
+
+func TestUpdateAction(t *testing.T) {
+	cfg := config.Component{
+		Name: "testarm",
+		ConvertedAttributes: &AttrConfig{
+			Speed:               0.3,
+			Host:                "localhost",
+			ArmHostedKinematics: false,
+		},
+	}
+
+	shouldNotReconfigureCfg := config.Component{
+		Name: "testarm",
+		ConvertedAttributes: &AttrConfig{
+			Speed:               0.5,
+			Host:                "localhost",
+			ArmHostedKinematics: false,
+		},
+	}
+
+	shouldReconfigureCfg := config.Component{
+		Name: "testarm",
+		ConvertedAttributes: &AttrConfig{
+			Speed:               0.5,
+			Host:                "new",
+			ArmHostedKinematics: false,
+		},
+	}
+
+	attrs, ok := cfg.ConvertedAttributes.(*AttrConfig)
+	test.That(t, ok, test.ShouldBeTrue)
+
+	ur5e := &URArm{
+		speed:              attrs.Speed,
+		urHostedKinematics: attrs.ArmHostedKinematics,
+		host:               attrs.Host,
+	}
+
+	// scenario where we do not reconfigure
+	test.That(t, ur5e.UpdateAction(&shouldNotReconfigureCfg), test.ShouldEqual, config.None)
+
+	// scenario where we have to configure
+	test.That(t, ur5e.UpdateAction(&shouldReconfigureCfg), test.ShouldEqual, config.Reconfigure)
+
+	// wrap with reconfigurable arm to test the codepath that will be executed during reconfigure
+	reconfArm, err := arm.WrapWithReconfigurable(ur5e, resource.Name{})
+	test.That(t, err, test.ShouldBeNil)
+
+	// scenario where we do not reconfigure
+	obj, canUpdate := reconfArm.(config.ComponentUpdate)
+	test.That(t, canUpdate, test.ShouldBeTrue)
+	test.That(t, obj.UpdateAction(&shouldNotReconfigureCfg), test.ShouldEqual, config.None)
+
+	// scenario where we have to configure
+	obj, canUpdate = reconfArm.(config.ComponentUpdate)
+	test.That(t, canUpdate, test.ShouldBeTrue)
+	test.That(t, obj.UpdateAction(&shouldReconfigureCfg), test.ShouldEqual, config.Reconfigure)
 }

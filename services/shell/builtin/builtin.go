@@ -14,6 +14,7 @@ import (
 	"github.com/edaniels/golog"
 	"go.viam.com/utils"
 
+	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/registry"
 	"go.viam.com/rdk/resource"
@@ -21,7 +22,7 @@ import (
 )
 
 func init() {
-	registry.RegisterService(shell.Subtype, resource.DefaultModelName, registry.Service{
+	registry.RegisterService(shell.Subtype, resource.DefaultServiceModel, registry.Service{
 		Constructor: func(ctx context.Context, dep registry.Dependencies, c config.Service, logger golog.Logger) (interface{}, error) {
 			return NewBuiltIn(logger)
 		},
@@ -35,6 +36,7 @@ func NewBuiltIn(logger golog.Logger) (shell.Service, error) {
 }
 
 type builtIn struct {
+	generic.Unimplemented
 	logger                  golog.Logger
 	activeBackgroundWorkers sync.WaitGroup
 }

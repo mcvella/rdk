@@ -40,7 +40,7 @@ func TestForwardKinematics(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 
 	// Confirm end effector starts at 300, 0, 360.25
-	expect := spatial.NewPoseFromOrientation(
+	expect := spatial.NewPose(
 		r3.Vector{X: 300, Y: 0, Z: 360.25},
 		&spatial.OrientationVectorDegrees{Theta: 0, OX: 1, OY: 0, OZ: 0},
 	)
@@ -53,7 +53,7 @@ func TestForwardKinematics(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 
 	// Confirm end effector starts at 365, 0, 360.25
-	expect = spatial.NewPoseFromOrientation(
+	expect = spatial.NewPose(
 		r3.Vector{X: 365, Y: 0, Z: 360.25},
 		&spatial.OrientationVectorDegrees{Theta: 0, OX: 1, OY: 0, OZ: 0},
 	)
@@ -70,7 +70,7 @@ func TestForwardKinematics(t *testing.T) {
 	newPos := []float64{45, -45, 0, 0, 0, 0}
 	pos, err = ComputePosition(m, &pb.JointPositions{Values: newPos})
 	test.That(t, err, test.ShouldBeNil)
-	expect = spatial.NewPoseFromOrientation(
+	expect = spatial.NewPose(
 		r3.Vector{X: 57.5, Y: 57.5, Z: 545.1208197765168},
 		&spatial.OrientationVectorDegrees{Theta: 0, OX: 0.5, OY: 0.5, OZ: 0.707},
 	)
@@ -79,7 +79,7 @@ func TestForwardKinematics(t *testing.T) {
 	newPos = []float64{-45, 0, 0, 0, 0, 45}
 	pos, err = ComputePosition(m, &pb.JointPositions{Values: newPos})
 	test.That(t, err, test.ShouldBeNil)
-	expect = spatial.NewPoseFromOrientation(
+	expect = spatial.NewPose(
 		r3.Vector{X: 258.0935, Y: -258.0935, Z: 360.25},
 		&spatial.OrientationVectorDegrees{Theta: utils.RadToDeg(0.7854), OX: 0.707, OY: -0.707, OZ: 0},
 	)
@@ -90,6 +90,16 @@ func TestForwardKinematics(t *testing.T) {
 	pos, err = ComputePosition(m, &pb.JointPositions{Values: newPos})
 	test.That(t, pos, test.ShouldBeNil)
 	test.That(t, err, test.ShouldNotBeNil)
+
+	// Test out of bounds. Note that ComputeOOBPosition will NOT return nil on OOB.
+	newPos = []float64{-45, 0, 0, 0, 0, 999}
+	pos, err = ComputeOOBPosition(m, &pb.JointPositions{Values: newPos})
+	expect = spatial.NewPose(
+		r3.Vector{X: 258.093975133089884366199840, Y: -258.093975133089884366199840, Z: 360.250000000000113686837722},
+		&spatial.R4AA{Theta: -2.48798057005674, RX: 0.23071941493324336, RY: -0.7100813450467474, RZ: 0.6652465971273088},
+	)
+	test.That(t, spatial.PoseAlmostEqualEps(expect, pos, 0.01), test.ShouldBeTrue)
+	test.That(t, err, test.ShouldBeNil)
 }
 
 const derivEqualityEpsilon = 1e-16
@@ -283,7 +293,7 @@ func TestCombinedIKinematics(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 
 	// Test ability to arrive at another position
-	pos := spatial.NewPoseFromOrientation(
+	pos := spatial.NewPose(
 		r3.Vector{X: -46, Y: -133, Z: 372},
 		&spatial.OrientationVectorDegrees{OX: 1.79, OY: -1.32, OZ: -1.11},
 	)
@@ -291,7 +301,7 @@ func TestCombinedIKinematics(t *testing.T) {
 	test.That(t, err, test.ShouldBeNil)
 
 	// Test moving forward 20 in X direction from previous position
-	pos = spatial.NewPoseFromOrientation(
+	pos = spatial.NewPose(
 		r3.Vector{X: -66, Y: -133, Z: 372},
 		&spatial.OrientationVectorDegrees{OX: 1.78, OY: -3.3, OZ: -1.11},
 	)
@@ -317,7 +327,7 @@ func TestUR5NloptIKinematics(t *testing.T) {
 func TestSVAvsDH(t *testing.T) {
 	mSVA, err := frame.ParseModelJSONFile(utils.ResolveFile("components/arm/universalrobots/ur5e.json"), "")
 	test.That(t, err, test.ShouldBeNil)
-	mDH, err := frame.ParseModelJSONFile(utils.ResolveFile("components/arm/universalrobots/ur5e_DH.json"), "")
+	mDH, err := frame.ParseModelJSONFile(utils.ResolveFile("referenceframe/testjson/ur5eDH.json"), "")
 	test.That(t, err, test.ShouldBeNil)
 
 	numTests := 10000
@@ -388,4 +398,26 @@ IK:
 	}
 
 	return solutions, nil
+}
+
+// Test loading model kinematics of the same arm via ModelJSON parsing and URDF parsing and comparing results.
+func TestKinematicsJSONvsURDF(t *testing.T) {
+	numTests := 100
+
+	mJSON, err := frame.ParseModelJSONFile(utils.ResolveFile("components/arm/universalrobots/ur5e.json"), "")
+	test.That(t, err, test.ShouldBeNil)
+	mURDF, err := frame.ParseURDFFile(utils.ResolveFile("referenceframe/testurdf/ur5_viam.urdf"), "")
+	test.That(t, err, test.ShouldBeNil)
+
+	seed := rand.New(rand.NewSource(50))
+	for i := 0; i < numTests; i++ {
+		joints := frame.JointPositionsFromRadians(frame.GenerateRandomConfiguration(mJSON, seed))
+
+		posJSON, err := ComputePosition(mJSON, joints)
+		test.That(t, err, test.ShouldBeNil)
+		posURDF, err := ComputePosition(mURDF, joints)
+		test.That(t, err, test.ShouldBeNil)
+
+		test.That(t, spatial.PoseAlmostEqual(posJSON, posURDF), test.ShouldBeTrue)
+	}
 }

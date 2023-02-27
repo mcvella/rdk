@@ -4,10 +4,9 @@ import (
 	"context"
 	"testing"
 
-	// register.
-	commonpb "go.viam.com/api/common/v1"
 	"go.viam.com/test"
 
+	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/components/gripper"
 	_ "go.viam.com/rdk/components/register"
 	"go.viam.com/rdk/referenceframe"
@@ -38,13 +37,14 @@ type mock struct {
 	grabCount   int
 	name        string
 	reconfCount int
+	cmd         map[string]interface{}
 }
 
 func (m *mock) Move(
 	ctx context.Context,
 	gripperName resource.Name,
 	grabPose *referenceframe.PoseInFrame,
-	worldState *commonpb.WorldState,
+	worldState *referenceframe.WorldState,
 	extra map[string]interface{},
 ) (bool, error) {
 	m.grabCount++
@@ -55,7 +55,7 @@ func (m *mock) MoveSingleComponent(
 	ctx context.Context,
 	gripperName resource.Name,
 	grabPose *referenceframe.PoseInFrame,
-	worldState *commonpb.WorldState,
+	worldState *referenceframe.WorldState,
 	extra map[string]interface{},
 ) (bool, error) {
 	m.grabCount++
@@ -66,10 +66,17 @@ func (m *mock) GetPose(
 	ctx context.Context,
 	componentName resource.Name,
 	destinationFrame string,
-	supplementalTransforms []*commonpb.Transform,
+	supplementalTransforms []*referenceframe.LinkInFrame,
 	extra map[string]interface{},
 ) (*referenceframe.PoseInFrame, error) {
 	return &referenceframe.PoseInFrame{}, nil
+}
+
+func (m *mock) DoCommand(_ context.Context,
+	cmd map[string]interface{},
+) (map[string]interface{}, error) {
+	m.cmd = cmd
+	return cmd, nil
 }
 
 func (m *mock) Close(ctx context.Context) error {
@@ -85,7 +92,7 @@ func TestFromRobot(t *testing.T) {
 	test.That(t, svc, test.ShouldNotBeNil)
 
 	grabPose := referenceframe.NewPoseInFrame("", spatialmath.NewZeroPose())
-	result, err := svc.Move(context.Background(), gripper.Named("fake"), grabPose, &commonpb.WorldState{}, map[string]interface{}{})
+	result, err := svc.Move(context.Background(), gripper.Named("fake"), grabPose, &referenceframe.WorldState{}, map[string]interface{}{})
 	test.That(t, err, test.ShouldBeNil)
 	test.That(t, result, test.ShouldEqual, false)
 	test.That(t, svc1.grabCount, test.ShouldEqual, 1)
@@ -147,4 +154,13 @@ func TestReconfigurable(t *testing.T) {
 	err = reconfSvc1.Reconfigure(context.Background(), nil)
 	test.That(t, err, test.ShouldNotBeNil)
 	test.That(t, err, test.ShouldBeError, rutils.NewUnexpectedTypeError(reconfSvc1, nil))
+}
+
+func TestDoCommand(t *testing.T) {
+	svc := &mock{name: "svc1"}
+
+	resp, err := svc.DoCommand(context.Background(), generic.TestCommand)
+	test.That(t, err, test.ShouldBeNil)
+	test.That(t, resp, test.ShouldResemble, generic.TestCommand)
+	test.That(t, svc.cmd, test.ShouldResemble, generic.TestCommand)
 }

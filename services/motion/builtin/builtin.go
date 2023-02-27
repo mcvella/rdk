@@ -8,8 +8,8 @@ import (
 	"github.com/edaniels/golog"
 	"github.com/golang/geo/r3"
 
-	commonpb "go.viam.com/api/common/v1"
 	"go.viam.com/rdk/components/arm"
+	"go.viam.com/rdk/components/generic"
 	"go.viam.com/rdk/config"
 	"go.viam.com/rdk/motionplan"
 	"go.viam.com/rdk/operation"
@@ -23,12 +23,12 @@ import (
 )
 
 func init() {
-	registry.RegisterService(motion.Subtype, resource.DefaultModelName, registry.Service{
+	registry.RegisterService(motion.Subtype, resource.DefaultServiceModel, registry.Service{
 		RobotConstructor: func(ctx context.Context, r robot.Robot, c config.Service, logger golog.Logger) (interface{}, error) {
 			return NewBuiltIn(ctx, r, c, logger)
 		},
 	})
-	resource.AddDefaultService(motion.Named(resource.DefaultModelName))
+	resource.AddDefaultService(motion.Named(resource.DefaultServiceName))
 }
 
 // NewBuiltIn returns a new move and grab service for the given robot.
@@ -40,6 +40,7 @@ func NewBuiltIn(ctx context.Context, r robot.Robot, config config.Service, logge
 }
 
 type builtIn struct {
+	generic.Unimplemented
 	r      robot.Robot
 	logger golog.Logger
 }
@@ -49,17 +50,17 @@ func (ms *builtIn) Move(
 	ctx context.Context,
 	componentName resource.Name,
 	destination *referenceframe.PoseInFrame,
-	worldState *commonpb.WorldState,
+	worldState *referenceframe.WorldState,
 	extra map[string]interface{},
 ) (bool, error) {
 	operation.CancelOtherWithLabel(ctx, "motion-service")
 	logger := ms.r.Logger()
 
 	// get goal frame
-	goalFrameName := destination.FrameName()
+	goalFrameName := destination.Parent()
 	logger.Debugf("goal given in frame of %q", goalFrameName)
 
-	frameSys, err := framesystem.RobotFrameSystem(ctx, ms.r, worldState.GetTransforms())
+	frameSys, err := framesystem.RobotFrameSystem(ctx, ms.r, worldState.Transforms)
 	if err != nil {
 		return false, err
 	}
@@ -69,9 +70,9 @@ func (ms *builtIn) Move(
 	if err != nil {
 		return false, err
 	}
-	
+
 	movingFrame := frameSys.Frame(componentName.ShortName())
-	
+
 	logger.Debugf("frame system inputs: %v", fsInputs)
 	if movingFrame == nil {
 		return false, fmt.Errorf("component named %s not found in robot frame system", componentName.ShortName())
@@ -123,7 +124,7 @@ func (ms *builtIn) MoveSingleComponent(
 	ctx context.Context,
 	componentName resource.Name,
 	destination *referenceframe.PoseInFrame,
-	worldState *commonpb.WorldState,
+	worldState *referenceframe.WorldState,
 	extra map[string]interface{},
 ) (bool, error) {
 	operation.CancelOtherWithLabel(ctx, "motion-service")
@@ -140,10 +141,10 @@ func (ms *builtIn) MoveSingleComponent(
 
 	// get destination pose in frame of movable component
 	goalPose := destination.Pose()
-	if destination.FrameName() != componentName.ShortName() {
-		logger.Debugf("goal given in frame of %q", destination.FrameName())
+	if destination.Parent() != componentName.ShortName() {
+		logger.Debugf("goal given in frame of %q", destination.Parent())
 
-		frameSys, err := framesystem.RobotFrameSystem(ctx, ms.r, worldState.GetTransforms())
+		frameSys, err := framesystem.RobotFrameSystem(ctx, ms.r, worldState.Transforms)
 		if err != nil {
 			return false, err
 		}
@@ -163,7 +164,6 @@ func (ms *builtIn) MoveSingleComponent(
 		goalPose = goalPoseInFrame.Pose()
 		logger.Debugf("converted goal pose %q", spatialmath.PoseToProtobuf(goalPose))
 	}
-
 	err := movableArm.MoveToPosition(ctx, goalPose, worldState, extra)
 	if err == nil {
 		return true, nil
@@ -175,7 +175,7 @@ func (ms *builtIn) GetPose(
 	ctx context.Context,
 	componentName resource.Name,
 	destinationFrame string,
-	supplementalTransforms []*commonpb.Transform,
+	supplementalTransforms []*referenceframe.LinkInFrame,
 	extra map[string]interface{},
 ) (*referenceframe.PoseInFrame, error) {
 	if destinationFrame == "" {

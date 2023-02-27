@@ -4,10 +4,11 @@ package arm
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/edaniels/golog"
-	commonpb "go.viam.com/api/common/v1"
 	pb "go.viam.com/api/component/arm/v1"
 	viamutils "go.viam.com/utils"
 	"go.viam.com/utils/rpc"
@@ -47,11 +48,11 @@ func init() {
 	})
 
 	data.RegisterCollector(data.MethodMetadata{
-		Subtype:    SubtypeName,
+		Subtype:    Subtype,
 		MethodName: endPosition.String(),
 	}, newEndPositionCollector)
 	data.RegisterCollector(data.MethodMetadata{
-		Subtype:    SubtypeName,
+		Subtype:    Subtype,
 		MethodName: jointPositions.String(),
 	}, newJointPositionsCollector)
 }
@@ -60,6 +61,10 @@ func init() {
 const (
 	SubtypeName = resource.SubtypeName("arm")
 )
+
+// MTPoob is a string that all MoveToPosition errors should contain if the method is called
+// and there are joints which are out of bounds.
+const MTPoob = "cartesian movements are not allowed when arm joints are out of bounds"
 
 var defaultArmPlannerOptions = map[string]interface{}{
 	"motion_profile": motionplan.LinearMotionProfile,
@@ -85,7 +90,7 @@ type Arm interface {
 	// MoveToPosition moves the arm to the given absolute position.
 	// The worldState argument should be treated as optional by all implementing drivers
 	// This will block until done or a new operation cancels this one
-	MoveToPosition(ctx context.Context, pose spatialmath.Pose, worldState *commonpb.WorldState, extra map[string]interface{}) error
+	MoveToPosition(ctx context.Context, pose spatialmath.Pose, worldState *referenceframe.WorldState, extra map[string]interface{}) error
 
 	// MoveToJointPositions moves the arm's joints to the given positions.
 	// This will block until done or a new operation cancels this one
@@ -100,13 +105,12 @@ type Arm interface {
 	generic.Generic
 	referenceframe.ModelFramer
 	referenceframe.InputEnabled
+	resource.MovingCheckable
 }
 
 // A LocalArm represents an Arm that can report whether it is moving or not.
 type LocalArm interface {
 	Arm
-
-	resource.MovingCheckable
 }
 
 var (
@@ -122,17 +126,17 @@ var (
 
 // NewUnimplementedInterfaceError is used when there is a failed interface check.
 func NewUnimplementedInterfaceError(actual interface{}) error {
-	return utils.NewUnimplementedInterfaceError((Arm)(nil), actual)
+	return utils.NewUnimplementedInterfaceError((*Arm)(nil), actual)
 }
 
 // NewUnimplementedLocalInterfaceError is used when there is a failed interface check.
 func NewUnimplementedLocalInterfaceError(actual interface{}) error {
-	return utils.NewUnimplementedInterfaceError((LocalArm)(nil), actual)
+	return utils.NewUnimplementedInterfaceError((*LocalArm)(nil), actual)
 }
 
 // DependencyTypeError is used when a resource doesn't implement the expected interface.
-func DependencyTypeError(name, actual interface{}) error {
-	return utils.DependencyTypeError(name, (Arm)(nil), actual)
+func DependencyTypeError(name string, actual interface{}) error {
+	return utils.DependencyTypeError(name, (*Arm)(nil), actual)
 }
 
 // FromDependencies is a helper for getting the named arm from a collection of
@@ -151,15 +155,7 @@ func FromDependencies(deps registry.Dependencies, name string) (Arm, error) {
 
 // FromRobot is a helper for getting the named Arm from the given Robot.
 func FromRobot(r robot.Robot, name string) (Arm, error) {
-	res, err := r.ResourceByName(Named(name))
-	if err != nil {
-		return nil, err
-	}
-	part, ok := res.(Arm)
-	if !ok {
-		return nil, NewUnimplementedInterfaceError(res)
-	}
-	return part, nil
+	return robot.ResourceFromRobot[Arm](r, Named(name))
 }
 
 // NamesFromRobot is a helper for getting all arm names from the given Robot.
@@ -169,15 +165,16 @@ func NamesFromRobot(r robot.Robot) []string {
 
 // CreateStatus creates a status from the arm.
 func CreateStatus(ctx context.Context, resource interface{}) (*pb.Status, error) {
-	arm, ok := resource.(LocalArm)
+	arm, ok := resource.(Arm)
 	if !ok {
 		return nil, NewUnimplementedLocalInterfaceError(resource)
 	}
-	endPosition, err := arm.EndPosition(ctx, nil)
+	jointPositions, err := arm.JointPositions(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	jointPositions, err := arm.JointPositions(ctx, nil)
+	model := arm.ModelFrame()
+	endPosition, err := motionplan.ComputePosition(model, jointPositions)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +216,7 @@ func (r *reconfigurableArm) EndPosition(ctx context.Context, extra map[string]in
 func (r *reconfigurableArm) MoveToPosition(
 	ctx context.Context,
 	pose spatialmath.Pose,
-	worldState *commonpb.WorldState,
+	worldState *referenceframe.WorldState,
 	extra map[string]interface{},
 ) error {
 	r.mu.RLock()
@@ -267,6 +264,12 @@ func (r *reconfigurableArm) Close(ctx context.Context) error {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return viamutils.TryClose(ctx, r.actual)
+}
+
+func (r *reconfigurableArm) IsMoving(ctx context.Context) (bool, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.actual.IsMoving(ctx)
 }
 
 func (r *reconfigurableArm) Reconfigure(ctx context.Context, newArm resource.Reconfigurable) error {
@@ -350,7 +353,20 @@ func WrapWithReconfigurable(r interface{}, name resource.Name) (resource.Reconfi
 }
 
 // Move is a helper function to abstract away movement for general arms.
-func Move(ctx context.Context, r robot.Robot, a Arm, dst spatialmath.Pose, worldState *commonpb.WorldState) error {
+func Move(ctx context.Context, r robot.Robot, a Arm, dst spatialmath.Pose, worldState *referenceframe.WorldState) error {
+	joints, err := a.JointPositions(ctx, nil)
+	if err != nil {
+		return err
+	}
+	model := a.ModelFrame()
+	// check that joint positions are not out of bounds
+	_, err = motionplan.ComputePosition(model, joints)
+	if err != nil && strings.Contains(err.Error(), referenceframe.OOBErrString) {
+		return errors.New(MTPoob + ": " + err.Error())
+	} else if err != nil {
+		return err
+	}
+
 	solution, err := Plan(ctx, r, a, dst, worldState)
 	if err != nil {
 		return err
@@ -365,10 +381,10 @@ func Plan(
 	r robot.Robot,
 	a Arm,
 	dst spatialmath.Pose,
-	worldState *commonpb.WorldState,
+	worldState *referenceframe.WorldState,
 ) ([][]referenceframe.Input, error) {
 	// build the framesystem
-	fs, err := framesystem.RobotFrameSystem(ctx, r, worldState.GetTransforms())
+	fs, err := framesystem.RobotFrameSystem(ctx, r, worldState.Transforms)
 	if err != nil {
 		return nil, err
 	}
@@ -378,7 +394,7 @@ func Plan(
 	// PlanRobotMotion needs a frame system which contains the frame being solved for
 	if fs.Frame(armName) == nil {
 		if worldState != nil {
-			if len(worldState.Obstacles) != 0 || len(worldState.InteractionSpaces) != 0 || len(worldState.Transforms) != 0 {
+			if len(worldState.Obstacles) != 0 || len(worldState.Transforms) != 0 {
 				return nil, errors.New("arm must be in frame system to use worldstate")
 			}
 		}
@@ -407,6 +423,35 @@ func GoToWaypoints(ctx context.Context, a Arm, waypoints [][]referenceframe.Inpu
 		err = a.GoToInputs(ctx, waypoint)
 		if err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// CheckDesiredJointPositions validates that the desired joint positions either bring the joint back
+// in bounds or do not move the joint more out of bounds.
+func CheckDesiredJointPositions(ctx context.Context, a Arm, desiredJoints []float64) error {
+	currentJointPos, err := a.JointPositions(ctx, nil)
+	if err != nil {
+		return err
+	}
+	checkPositions := currentJointPos.Values
+	model := a.ModelFrame()
+	joints := model.ModelConfig().Joints
+	for i, val := range desiredJoints {
+		max := joints[i].Max
+		min := joints[i].Min
+		currPosition := checkPositions[i]
+		// to make sure that val is a valid input
+		// it must either bring the joint more
+		// inbounds or keep the joint inbounds.
+		if currPosition > max {
+			max = currPosition
+		} else if currPosition < min {
+			min = currPosition
+		}
+		if val > max || val < min {
+			return fmt.Errorf("joint %v needs to be within range [%v, %v] and cannot be moved to %v", i, min, max, val)
 		}
 	}
 	return nil

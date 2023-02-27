@@ -41,7 +41,7 @@ func init() {
 
 // NewUnimplementedInterfaceError is used when there is a failed interface check.
 func NewUnimplementedInterfaceError(actual interface{}) error {
-	return utils.NewUnimplementedInterfaceError((Service)(nil), actual)
+	return utils.NewUnimplementedInterfaceError((*Service)(nil), actual)
 }
 
 // SubtypeName is the name of the type of service.
@@ -76,6 +76,10 @@ type Service interface {
 		bool,
 		map[string]interface{},
 	) (string, image.Image, *vision.Object, error)
+	GetInternalState(ctx context.Context, name string) ([]byte, error)
+	GetPointCloudMapStream(ctx context.Context, name string) (func() ([]byte, error), error)
+	GetInternalStateStream(ctx context.Context, name string) (func() ([]byte, error), error)
+	resource.Generic
 }
 
 type reconfigurableSlam struct {
@@ -108,6 +112,32 @@ func (svc *reconfigurableSlam) GetMap(ctx context.Context,
 	svc.mu.RLock()
 	defer svc.mu.RUnlock()
 	return svc.actual.GetMap(ctx, name, mimeType, cp, include, extra)
+}
+
+func (svc *reconfigurableSlam) GetInternalState(ctx context.Context, name string) ([]byte, error) {
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+	return svc.actual.GetInternalState(ctx, name)
+}
+
+func (svc *reconfigurableSlam) GetPointCloudMapStream(ctx context.Context, name string) (func() ([]byte, error), error) {
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+	return svc.actual.GetPointCloudMapStream(ctx, name)
+}
+
+func (svc *reconfigurableSlam) GetInternalStateStream(ctx context.Context, name string) (func() ([]byte, error), error) {
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+	return svc.actual.GetInternalStateStream(ctx, name)
+}
+
+func (svc *reconfigurableSlam) DoCommand(ctx context.Context,
+	cmd map[string]interface{},
+) (map[string]interface{}, error) {
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+	return svc.actual.DoCommand(ctx, cmd)
 }
 
 func (svc *reconfigurableSlam) Close(ctx context.Context) error {

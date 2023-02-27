@@ -15,6 +15,7 @@ import (
 
 	"go.viam.com/rdk/registry"
 	"go.viam.com/rdk/resource"
+	"go.viam.com/rdk/robot"
 	"go.viam.com/rdk/subtype"
 	rdkutils "go.viam.com/rdk/utils"
 )
@@ -57,6 +58,7 @@ type Service interface {
 	Waypoints(ctx context.Context, extra map[string]interface{}) ([]Waypoint, error)
 	AddWaypoint(ctx context.Context, point *geo.Point, extra map[string]interface{}) error
 	RemoveWaypoint(ctx context.Context, id primitive.ObjectID, extra map[string]interface{}) error
+	resource.Generic
 }
 
 var (
@@ -78,6 +80,11 @@ var Subtype = resource.NewSubtype(
 // Named is a helper for getting the named navigation service's typed resource name.
 func Named(name string) resource.Name {
 	return resource.NameFromSubtype(Subtype, name)
+}
+
+// FromRobot is a helper for getting the named navigation service from the given Robot.
+func FromRobot(r robot.Robot, name string) (Service, error) {
+	return robot.ResourceFromRobot[Service](r, Named(name))
 }
 
 // Config describes how to configure the service.
@@ -150,6 +157,14 @@ func (svc *reconfigurableNavigation) RemoveWaypoint(ctx context.Context, id prim
 	return svc.actual.RemoveWaypoint(ctx, id, extra)
 }
 
+func (svc *reconfigurableNavigation) DoCommand(ctx context.Context,
+	cmd map[string]interface{},
+) (map[string]interface{}, error) {
+	svc.mu.RLock()
+	defer svc.mu.RUnlock()
+	return svc.actual.DoCommand(ctx, cmd)
+}
+
 func (svc *reconfigurableNavigation) Close(ctx context.Context) error {
 	svc.mu.RLock()
 	defer svc.mu.RUnlock()
@@ -173,7 +188,7 @@ func (svc *reconfigurableNavigation) Reconfigure(ctx context.Context, newSvc res
 
 // NewUnimplementedInterfaceError is used when there is a failed interface check.
 func NewUnimplementedInterfaceError(actual interface{}) error {
-	return rdkutils.NewUnimplementedInterfaceError((Service)(nil), actual)
+	return rdkutils.NewUnimplementedInterfaceError((*Service)(nil), actual)
 }
 
 // WrapWithReconfigurable wraps a navigation service as a Reconfigurable.
